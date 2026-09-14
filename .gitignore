@@ -1,0 +1,19 @@
+# Segreti — MAI committare
+local.properties
+
+# Build output
+*.iml
+.gradle/
+/local.properties
+/.idea/
+.DS_Store
+/build
+/captures
+.externalNativeBuild
+.cxx
+*.apk
+*.aab
+
+# File generati dai motori STT/wake-word copiati in fase di runtime
+# non fanno parte del codice sorgente, sono copie locali.
+app/build/

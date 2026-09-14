@@ -1,0 +1,113 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- Richiesto SOLO dalla ricerca Spotify (SpotifyAction.kt) — l'unico
+       punto dell'app che contatta un server esterno. Wake-word, STT e
+       TTS restano interamente locali/offline. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
+
+    <!-- Microfono per wake-word e STT -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+
+    <!-- Foreground service in ascolto continuo (Android 14+) -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+
+    <!-- Bluetooth toggle (Android 12+) -->
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+
+    <!-- Timer -->
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+
+    <!-- Necessario da Android 13+ perché QUALSIASI notifica creata dall'app
+         (inclusa quella di scadenza timer) sia effettivamente visibile —
+         senza, la chiamata a notify() non fallisce, semplicemente non
+         mostra nulla. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!-- Per il prompt di esenzione battery optimization (facoltativo, va richiesto
+         esplicitamente all'utente, GrapheneOS non lo concede mai in automatico) -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+
+    <!-- Da Android 11+ (package visibility), senza questo l'app potrebbe non
+         riuscire a "vedere" nessun motore TTS installato, anche se presente
+         sul dispositivo. Mancava del tutto — un'omissione reale, non solo
+         il problema (separato) di GrapheneOS che non include un motore TTS
+         di sistema per default. -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.TTS_SERVICE" />
+        </intent>
+    </queries>
+
+    <application
+        android:label="Lori"
+        android:icon="@mipmap/ic_launcher"
+        android:allowBackup="false">
+
+        <!-- Vera schermata di avvio: setup, permessi e tester manuale -->
+        <activity
+            android:name=".MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+            <intent-filter>
+                <action android:name="android.intent.action.ASSIST" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+
+        <!-- Solo per sviluppo: schermata di calibrazione soglia VAD, raggiungibile
+             da un pulsante in MainActivity, non più come launcher -->
+        <activity
+            android:name=".debug.VadCalibrationActivity"
+            android:exported="false" />
+
+        <!-- Servizio principale che ti registra come assistente di sistema -->
+        <service
+            android:name=".LocalVoiceInteractionService"
+            android:permission="android.permission.BIND_VOICE_INTERACTION"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.service.voice.VoiceInteractionService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.voice_interaction"
+                android:resource="@xml/interactor" />
+        </service>
+
+        <service
+            android:name=".LocalVoiceInteractionSessionService"
+            android:permission="android.permission.BIND_VOICE_INTERACTION"
+            android:exported="false" />
+
+        <!-- Richiesto insieme a VoiceInteractionService per qualificarsi
+             per il ruolo di sistema ASSISTANT -->
+        <service
+            android:name=".LocalVoiceRecognitionService"
+            android:permission="android.permission.BIND_RECOGNITION_SERVICE"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.speech.RecognitionService" />
+            </intent-filter>
+        </service>
+
+        <!-- Foreground service: ascolto continuo VAD + wake-word a basso consumo -->
+        <service
+            android:name=".service.ListeningForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="microphone" />
+
+        <!-- Riceve la sveglia AlarmManager quando un timer impostato via voce
+             scade. Target esplicito (Intent(context, TimerExpiredReceiver::class.java)),
+             non serve un intent-filter con azione implicita. -->
+        <receiver
+            android:name=".actions.TimerExpiredReceiver"
+            android:exported="false" />
+
+    </application>
+</manifest>
