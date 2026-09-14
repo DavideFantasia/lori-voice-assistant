@@ -8,6 +8,11 @@
 -keep class org.vosk.** { *; }
 -dontwarn org.vosk.**
 
+# Mantieni intatte le librerie JNA (necessarie per Vosk)
+-keep class com.sun.jna.** { *; }
+-keepclassmembers class * extends com.sun.jna.** { *; }
+-dontwarn com.sun.jna.**
+
 # ONNX Runtime (JNI)
 -keep class ai.onnxruntime.** { *; }
 -dontwarn ai.onnxruntime.**
