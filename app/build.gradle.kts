@@ -23,8 +23,8 @@ android {
         applicationId = "com.example.localvoice"
         minSdk = 29        // VoiceInteractionService stabile da qui in su
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0-skeleton"
+        versionCode = 2
+        versionName = "lori-1.0.2"
 
         // GrapheneOS supporta SOLO dispositivi Pixel, tutti arm64 — bundlare
         // armeabi-v7a/x86/x86_64 gonfia l'APK senza alcun beneficio per il
