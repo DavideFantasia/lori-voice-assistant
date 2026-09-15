@@ -14,9 +14,11 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.example.localvoice.actions.ActionExecutor
 import com.example.localvoice.audio.AudioCue
-import com.example.localvoice.audio.NoopWakeWordEngine
-import com.example.localvoice.audio.OpenWakeWordEngine
-import com.example.localvoice.audio.WakeWordEngine
+import com.example.localvoice.audio.KeywordSpotter
+import com.example.localvoice.audio.LocalKeywordSpotter
+import com.example.localvoice.audio.NoopKeywordSpotter
+import com.example.localvoice.audio.SharedAudioSource
+import com.example.localvoice.audio.VadGate
 import com.example.localvoice.intent.CommandParser
 import com.example.localvoice.stt.NoopSttEngine
 import com.example.localvoice.stt.SttEngine
@@ -26,6 +28,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -33,30 +36,44 @@ import com.example.localvoice.LocalVoiceInteractionService
 /**
  * Cuore del consumo energetico dell'app.
  *
- *   openWakeWord (ascolto continuo, MAI fermato durante la vita del servizio)
- *        │  keyword rilevata → beep di conferma
- *        │  (nuove rilevazioni ravvicinate vengono ignorate via
- *        │   handlingWakeWord, non fermano il motore)
+ * NUOVA ARCHITETTURA — UN SOLO MICROFONO PER TUTTA LA VITA DEL SERVIZIO:
+ *
+ *   SharedAudioSource (un solo AudioRecord, aperto in onCreate, mai
+ *   richiuso finché il servizio vive)
+ *        │  ogni chunk (~100ms) passa PRIMA dal VAD (VadGate), che è
+ *        │  quasi gratis in CPU — è lui il gate di tutto il resto
  *        ▼
- *   Vosk (Recognizer.acceptWaveForm, AudioRecord nostro con AEC/NS)
+ *   [se voce probabile] LocalKeywordSpotter (rialimenta la pipeline
+ *   mel→embedding→classificatore di openWakeWord con chunk esterni,
+ *   invece di usare la libreria che vuole il proprio AudioRecord)
+ *        │  score sopra soglia → beep di conferma
+ *        ▼
+ *   VoskSttEngine (stessa SharedAudioSource, NON un secondo AudioRecord —
+ *   legge dallo stesso buffer, usa lo stesso VAD per capire inizio/fine
+ *   del comando)
  *        │  testo finale (anche vuoto, se timeout)
  *        ▼
- *   parser + azione + TTS
+ *   parser + azione + TTS, poi si torna al keyword-spotting sullo
+ *   STESSO microfono, mai chiuso nel frattempo.
  *
- * NOTA ARCHITETTURALE: la versione precedente fermava/riavviava il motore
- * wake-word ad ogni singola rilevazione (stopListening()/startListening()).
- * Rimosso: sospettiamo fosse la causa sia dei "beep multipli" (rilevazioni
- * ravvicinate della stessa pronuncia processate più volte, prima che lo
- * stop avesse effetto) sia del microfono che smetteva di funzionare dopo
- * alcuni minuti (probabile degrado dell'AudioRecord interno della libreria
- * dopo troppi cicli ravvicinati di stop/riavvio — non verificabile con
- * certezza dato che è codice compilato di terze parti, ma il pattern dei
- * sintomi combacia). Ora il motore resta sempre acceso, gestito solo da un
- * flag software.
+ * PERCHÉ QUESTO CAMBIO: prima openWakeWord (libreria, AudioRecord proprio)
+ * e Vosk (AudioRecord proprio) erano due client del microfono distinti,
+ * attivi entrambi durante la cattura del comando — esattamente il tipo di
+ * contesa che si voleva evitare. Ora c'è un solo AudioRecord dall'inizio
+ * alla fine, e VAD/keyword-spotting/Vosk sono solo stadi logici che
+ * consumano lo stesso flusso di chunk in sequenza, mai in concorrenza.
+ *
+ * NOTA SUL MUTEX DI LETTURA: keywordSpotLoop e VoskSttEngine.startListening
+ * NON leggono mai contemporaneamente da sharedMic — il flag
+ * [capturingCommand] fa sì che keywordSpotLoop smetta di chiamare
+ * readChunk() (si limita ad attendere) per tutta la durata della cattura
+ * comando, che la riprende lei da sola internamente.
  */
 class ListeningForegroundService : Service() {
 
-    private lateinit var wakeWord: WakeWordEngine
+    private lateinit var sharedMic: SharedAudioSource
+    private val vad = VadGate()
+    private lateinit var keywordSpotter: KeywordSpotter
     private lateinit var stt: SttEngine
     private lateinit var tts: TtsEngine
     private lateinit var audioCue: AudioCue
@@ -65,15 +82,12 @@ class ListeningForegroundService : Service() {
 
     private val job = Job()
     private val scope = CoroutineScope(Dispatchers.Default + job)
+    private var keywordSpotJob: Job? = null
 
-    // Evita di gestire più rilevazioni ravvicinate della stessa pronuncia
-    // (causa dei "beep multipli"), e ci permette di NON fermare/riavviare
-    // il motore wake-word ad ogni ciclo — resta sempre acceso, ignoriamo
-    // solo le rilevazioni mentre stiamo già gestendo un comando. Il
-    // continuo stop()/start() sospettiamo fosse la causa del microfono che
-    // smetteva di funzionare dopo alcuni minuti (probabile degrado
-    // dell'AudioRecord interno della libreria dopo troppi cicli ravvicinati).
-    private val handlingWakeWord = AtomicBoolean(false)
+    // true mentre VoskSttEngine sta catturando un comando: il ciclo di
+    // keyword-spotting smette di leggere dal microfono condiviso finché
+    // non torna false (vedi NOTA SUL MUTEX DI LETTURA sopra).
+    private val capturingCommand = AtomicBoolean(false)
 
     private val forceWakeReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -87,26 +101,24 @@ class ListeningForegroundService : Service() {
     override fun onCreate() {
         super.onCreate()
 
+        sharedMic = SharedAudioSource(SAMPLE_RATE, CHUNK_SIZE_BYTES)
+
         // Nome del file .onnx della keyword — "hey_lori_it.onnx" è il nome
-        // del TUO modello italiano addestrato (non incluso in questo
-        // scheletro, aggiungilo tu in assets/ quando pronto). Se manca,
-        // il servizio degrada automaticamente a NoopWakeWordEngine (vedi
-        // sotto) — l'app non crasha, il wake-word resta solo disattivato.
-        // "hey_jarvis_test_en.onnx" (inglese, incluso) resta disponibile
-        // in assets/ per un test rapido della pipeline nel frattempo, se
-        // ti serve: basta cambiare il valore di questa variabile.
+        // del TUO modello italiano addestrato. Se manca, il servizio
+        // degrada automaticamente a NoopKeywordSpotter (l'app non crasha,
+        // il wake-word resta solo disattivato).
         val keywordAsset = "hey_lori_it.onnx"
-        wakeWord = if (assetExists(keywordAsset)) {
-            OpenWakeWordEngine(this, keywordAsset)
+        keywordSpotter = if (assetExists(keywordAsset)) {
+            LocalKeywordSpotter(this, classifierAsset = keywordAsset, threshold = 0.25f)
         } else {
             Log.w(TAG, "Asset keyword '$keywordAsset' non trovato: wake-word disattivato (Noop)")
-            NoopWakeWordEngine()
+            NoopKeywordSpotter()
         }
 
         // Il modello Vosk è una CARTELLA (non un singolo asset), quindi la
         // verifichiamo diversamente dal file .onnx del wake-word.
         stt = if (assetDirExists("model-it-small")) {
-            VoskSttEngine(this)
+            VoskSttEngine(this, sharedMic)
         } else {
             Log.w(TAG, "Cartella modello Vosk 'model-it-small' non trovata in assets/: STT disattivato (Noop). Vedi VoskSttEngine.kt per come procurartela.")
             NoopSttEngine()
@@ -116,7 +128,6 @@ class ListeningForegroundService : Service() {
         audioCue = AudioCue()
         actionExecutor = ActionExecutor(this, tts)
 
-        wakeWord.load()
         stt.load()
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -130,8 +141,11 @@ class ListeningForegroundService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        wakeWord.startListening { onWakeWordDetected() }
-        Log.d(TAG, "In ascolto della keyword")
+        if (keywordSpotJob == null) {
+            sharedMic.open()
+            startKeywordSpotLoop()
+            Log.d(TAG, "In ascolto della keyword (microfono condiviso, sempre aperto)")
+        }
         return START_STICKY
     }
 
@@ -139,7 +153,9 @@ class ListeningForegroundService : Service() {
 
     override fun onDestroy() {
         job.cancel()
-        wakeWord.release()
+        keywordSpotJob = null
+        sharedMic.close()
+        keywordSpotter.release()
         stt.release()
         tts.release()
         audioCue.release()
@@ -152,19 +168,49 @@ class ListeningForegroundService : Service() {
     }
 
     /**
+     * Ciclo unico: legge dal microfono condiviso, passa ogni chunk dal VAD
+     * (quasi gratis), e SOLO se il VAD dice "voce probabile" alimenta il
+     * keyword-spotter (che è la parte costosa — inferenza di 3 modelli
+     * ONNX). Questo è il risparmio di batteria che cercavi fin dall'inizio:
+     * niente più inferenza neurale continua sul silenzio puro.
+     */
+    private fun startKeywordSpotLoop() {
+        keywordSpotJob = scope.launch {
+            val buffer = ByteArray(CHUNK_SIZE_BYTES)
+            while (isActive) {
+                if (capturingCommand.get()) {
+                    // Vosk sta leggendo dallo stesso microfono: non
+                    // chiamiamo readChunk() per non entrare in contesa
+                    // (vedi NOTA SUL MUTEX DI LETTURA nella doc di classe).
+                    delay(50)
+                    continue
+                }
+
+                val read = sharedMic.readChunk(buffer)
+                if (read <= 0) continue
+
+                val pcm = toShortArray(buffer, read)
+                if (!vad.isVoiceLikely(pcm)) continue
+
+                val score = keywordSpotter.processChunk(pcm)
+                if (score != null) {
+                    Log.d(TAG, "Inferenza ONNX completata, score: $score")
+                    if (keywordSpotter.checkDetection(score)) {
+                        onWakeWordDetected()
+                    }
+                }
+            }
+        }
+    }
+
+    /**
      * Invocato quando la keyword scatta (o viene simulata dal tester).
-     *
-     * A differenza della versione precedente, NON fermiamo più il motore
-     * wake-word (niente stopListening()/startListening() ad ogni ciclo) —
-     * resta sempre acceso. Ci limitiamo a IGNORARE nuove rilevazioni mentre
-     * stiamo già gestendo un comando, tramite il flag [handlingWakeWord].
-     * Questo risolve sia i beep multipli (rilevazioni ravvicinate della
-     * stessa pronuncia venivano processate tutte) sia, probabilmente, il
-     * degrado del microfono dopo alcuni minuti (troppi cicli di
-     * stop/riavvio ravvicinati dell'AudioRecord interno della libreria).
+     * Alza [capturingCommand] così il ciclo di keyword-spotting smette di
+     * leggere dal microfono, suona il beep, poi passa la mano a Vosk —
+     * che legge dallo STESSO SharedAudioSource, non ne apre uno nuovo.
      */
     private fun onWakeWordDetected() {
-        if (!handlingWakeWord.compareAndSet(false, true)) {
+        if (!capturingCommand.compareAndSet(false, true)) {
             Log.d(TAG, "Rilevazione ignorata: comando già in gestione")
             return
         }
@@ -174,11 +220,18 @@ class ListeningForegroundService : Service() {
         Log.d(TAG, "Wake-word gestita: beep suonato, avvio Vosk tra poco")
 
         scope.launch {
-            delay(audioCue.durationMs.toLong()) // lascia finire il beep prima di ascoltare
+            // Leggiamo e buttiamo l'audio mentre il beep suona per evitare che si accumuli nel buffer di sistema.
+            val discardTimeMs = audioCue.durationMs.toLong()
+            val startDiscard = System.currentTimeMillis()
+            val dumpBuffer = ByteArray(CHUNK_SIZE_BYTES)
+
+            while (System.currentTimeMillis() - startDiscard < discardTimeMs) {
+                sharedMic.readChunk(dumpBuffer)
+            }
+
             stt.startListening { text ->
                 Log.d(TAG, "Vosk ha consegnato: '$text'")
                 handleRecognizedText(text)
-                handlingWakeWord.set(false) // torna a reagire a nuove rilevazioni
             }
         }
     }
@@ -188,12 +241,33 @@ class ListeningForegroundService : Service() {
         val confirmationMessage = actionExecutor.execute(voiceIntent)
         Log.d(TAG, "Intent=$voiceIntent conferma='$confirmationMessage'")
         if (confirmationMessage.isNotBlank()) {
-            // Parla e, quando ha finito, chiude l'interfaccia
-            tts.speak(confirmationMessage, {com.example.localvoice.LoriVoiceInteractionSession.closeUI()})
+            tts.speak(confirmationMessage) {
+                com.example.localvoice.LoriVoiceInteractionSession.closeUI()
+                resumeKeywordSpotting() // Riattivazione della Wake Word
+            }
         } else {
-            // Se non c'è nulla da dire (es. comando sconosciuto silenzioso), chiude subito
             com.example.localvoice.LoriVoiceInteractionSession.closeUI()
+            resumeKeywordSpotting() // Riattivazione della Wake Word
         }
+    }
+
+    // reset dello stato pulito
+    private fun resumeKeywordSpotting() {
+        keywordSpotter.reset()
+        capturingCommand.set(false)
+        Log.d(TAG, "Motore Wake-Word pulito e riattivato")
+    }
+
+    private fun toShortArray(buffer: ByteArray, length: Int): ShortArray {
+        val out = ShortArray(length / 2)
+        var i = 0
+        var j = 0
+        while (i + 1 < length) {
+            out[j] = ((buffer[i + 1].toInt() shl 8) or (buffer[i].toInt() and 0xFF)).toShort()
+            i += 2
+            j++
+        }
+        return out
     }
 
     private fun assetExists(name: String): Boolean {
@@ -232,6 +306,8 @@ class ListeningForegroundService : Service() {
     companion object {
         private const val TAG = "LocalVoiceCascade"
         private const val NOTIFICATION_ID = 42
+        private const val SAMPLE_RATE = 16000
+        private const val CHUNK_SIZE_BYTES = 3200 // ~100ms a 16kHz, PCM 16-bit mono
         const val ACTION_FORCE_WAKE = "com.example.localvoice.ACTION_FORCE_WAKE"
     }
 }

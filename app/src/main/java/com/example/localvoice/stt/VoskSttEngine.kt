@@ -1,12 +1,9 @@
 package com.example.localvoice.stt
 
 import android.content.Context
-import android.media.AudioFormat
-import android.media.AudioRecord
-import android.media.MediaRecorder
-import android.media.audiofx.AcousticEchoCanceler
-import android.media.audiofx.NoiseSuppressor
 import android.util.Log
+import com.example.localvoice.audio.SharedAudioSource
+import com.example.localvoice.audio.VadGate
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -18,18 +15,29 @@ import org.vosk.Model
 import org.vosk.Recognizer
 import org.vosk.android.StorageService
 import java.io.IOException
+import java.util.ArrayDeque
 import kotlin.math.sqrt
 
 /**
  * Wrapper su Vosk Android SDK (Apache 2.0, alphacephei) — API LOW-LEVEL
  * (Recognizer.acceptWaveForm), non più SpeechService.
  *
- * PERCHÉ IL CAMBIO: SpeechService gestiva da sé l'AudioRecord internamente,
- * senza esporre il suo audioSessionId — impossibile quindi agganciarci
- * AcousticEchoCanceler/NoiseSuppressor (richiedono l'audioSessionId
- * dell'AudioRecord specifico a cui applicarsi). Aprendo noi l'AudioRecord,
- * possiamo attaccarci questi effetti per attenuare musica/rumore di
- * sottofondo durante la cattura del comando.
+ * BUFFER AUDIO CONDIVISO: questa classe non apre più un proprio
+ * AudioRecord. Usa [SharedAudioSource] — un solo microfono per questa
+ * fase — e legge da lì gli stessi chunk sia per decidere con [VadGate]
+ * quando l'utente inizia/smette di parlare, sia per alimentare il
+ * riconoscitore Vosk. Prima le due cose (rilevazione voce e STT)
+ * avrebbero potuto competere per il microfono se fatte da componenti
+ * separati con un proprio AudioRecord ciascuno; ora leggono lo stesso
+ * chunk nello stesso ciclo.
+ *
+ * PRE-ROLL: dato che il VAD ha una piccola latenza di rilevamento (serve
+ * qualche chunk perché l'energia superi la soglia), teniamo un buffer
+ * circolare dei chunk più recenti PRIMA che parta il parlato, e li
+ * "svuotiamo" dentro Vosk non appena il VAD dichiara che si sta parlando
+ * — così non perdiamo la prima sillaba. Prima che il parlato inizi, i
+ * chunk NON vengono passati a Vosk (risparmio di decoding su puro
+ * silenzio); vengono passati solo dal momento in cui il VAD conferma voce.
  *
  * TRADE-OFF IMPORTANTE — grammar mode: per aumentare l'accuratezza sui
  * comandi fissi (bluetooth, timer, volume, media), vincoliamo Vosk a un
@@ -48,7 +56,10 @@ import kotlin.math.sqrt
  * 3. Con un file "uuid" aggiunto a mano dentro quella cartella (vedi note
  *    precedenti — particolarità nota di StorageService.unpack()).
  */
-class VoskSttEngine(private val context: Context) : SttEngine {
+class VoskSttEngine(
+    private val context: Context,
+    private val sharedMic: SharedAudioSource
+) : SttEngine {
 
     private var model: Model? = null
     private val job = Job()
@@ -107,32 +118,16 @@ class VoskSttEngine(private val context: Context) : SttEngine {
         // l'errore e/o il sorgente reale della classe Recognizer, lo
         // correggiamo mirato invece di indovinare alla cieca.
         val recognizer = Recognizer(model, SAMPLE_RATE, GRAMMAR_JSON)
+        val vad = VadGate()
+        // NB: sharedMic è già aperto e gestito dal servizio per tutta la sua
+        // vita (vedi ListeningForegroundService) — qui lo leggiamo soltanto,
+        // non lo apriamo né lo chiudiamo.
 
-        val minBuf = AudioRecord.getMinBufferSize(
-            SAMPLE_RATE.toInt(), AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT
-        )
-        val record = AudioRecord(
-            MediaRecorder.AudioSource.VOICE_RECOGNITION,
-            SAMPLE_RATE.toInt(),
-            AudioFormat.CHANNEL_IN_MONO,
-            AudioFormat.ENCODING_PCM_16BIT,
-            maxOf(minBuf, CHUNK_SIZE_BYTES * 4)
-        )
-
-        // Possibile SOLO perché apriamo noi l'AudioRecord — con SpeechService
-        // non avevamo modo di ottenere questo audioSessionId.
-        val aec = if (AcousticEchoCanceler.isAvailable()) {
-            AcousticEchoCanceler.create(record.audioSessionId)?.apply { enabled = true }
-        } else null
-        val ns = if (NoiseSuppressor.isAvailable()) {
-            NoiseSuppressor.create(record.audioSessionId)?.apply { enabled = true }
-        } else null
-        Log.d(TAG, "Cattura comando: AEC disponibile=${aec != null}, NS disponibile=${ns != null}")
+        // Buffer circolare dei chunk pre-parlato: ~PRE_ROLL_CHUNKS * 100ms.
+        val preRoll = ArrayDeque<ByteArray>()
 
         var resultText = ""
         try {
-            record.startRecording()
-
             val buffer = ByteArray(CHUNK_SIZE_BYTES)
             var silenceChunks = 0
             var waitChunks = 0
@@ -144,51 +139,43 @@ class VoskSttEngine(private val context: Context) : SttEngine {
             com.example.localvoice.VoiceUIState.reset()
 
             while (currentCoroutineContext().isActive) {
-                val read = record.read(buffer, 0, buffer.size)
+                val read = sharedMic.readChunk(buffer)
                 if (read <= 0) continue
 
-                // 1. Calcola l'RMS per l'indicatore audio lineare
-                var sumSquares = 0.0
-                var i = 0
-                while (i + 1 < read) {
-                    val sample = ((buffer[i + 1].toInt() shl 8) or (buffer[i].toInt() and 0xFF)).toShort()
-                    sumSquares += sample.toDouble() * sample.toDouble()
-                    i += 2
-                }
-                val count = read / 2
-                val rms = if (count > 0) sqrt(sumSquares / count) else 0.0
+                val chunk = buffer.copyOf(read)
+                val pcm = toShortArray(chunk, read)
 
-                // Normalizza il volume in un range 0f-1f.
-                // Puoi abbassare o alzare il valore "10000.0" se la barra è troppo sensibile/piatta.
+                // 1. RMS per l'indicatore audio lineare (UI) — invariato
+                val rms = rmsOf(pcm)
                 val normalizedVolume = ((rms / 10000.0) * 1.5).toFloat().coerceIn(0f, 1f)
                 com.example.localvoice.VoiceUIState.audioVolumeFlow.value = normalizedVolume
 
-                // Controllo del Voice Activity (preesistente)
-                val voice = rms > ENERGY_THRESHOLD
-
-                // 2. Invia i buffer a Vosk e ottieni i risultati parziali
-                val isFinal = recognizer.acceptWaveForm(buffer, read)
+                // 2. Decisione di attività vocale — ora delegata al VAD condiviso,
+                //    non più ricalcolata separatamente dentro questa classe.
+                val voice = vad.isVoiceLikely(pcm)
                 totalChunks++
 
-                // Estrai il testo intermedio e aggiorna la UI
-                if (!isFinal) {
-                    val partialJson = recognizer.partialResult
-                    val partialText = JSONObject(partialJson).optString("partial", "")
-                    if (partialText.isNotEmpty()) {
-                        com.example.localvoice.VoiceUIState.transcriptionFlow.value = partialText
-                    }
-                }
-
-                // Controllo dei timeout
                 if (!speechStarted) {
+                    // Ancora silenzio: bufferizza per il pre-roll, NON alimentare
+                    // ancora Vosk (risparmio di decoding sul silenzio puro).
+                    preRoll.addLast(chunk)
+                    if (preRoll.size > PRE_ROLL_CHUNKS) preRoll.removeFirst()
+
                     if (voice) {
                         speechStarted = true
                         silenceChunks = 0
+                        // Svuota il pre-roll dentro Vosk PRIMA di processare il
+                        // chunk corrente, per non perdere l'inizio del parlato.
+                        for (p in preRoll) recognizer.acceptWaveForm(p, p.size)
+                        preRoll.clear()
+                        feedAndUpdatePartial(recognizer, chunk)
                     } else {
                         waitChunks++
                         if (waitChunks * chunkMs > SPEECH_START_TIMEOUT_MS) break
+                        continue
                     }
                 } else {
+                    feedAndUpdatePartial(recognizer, chunk)
                     if (voice) silenceChunks = 0 else silenceChunks++
                     if (silenceChunks * chunkMs > SILENCE_END_MS) break
                 }
@@ -200,37 +187,47 @@ class VoskSttEngine(private val context: Context) : SttEngine {
             resultText = extractText(recognizer.finalResult)
             com.example.localvoice.VoiceUIState.transcriptionFlow.value = resultText
 
-            // (Opzionale) Azzera il volume quando l'ascolto termina
+            // Azzera il volume quando l'ascolto termina
             com.example.localvoice.VoiceUIState.audioVolumeFlow.value = 0f
 
             Log.d(TAG, "Testo riconosciuto: '$resultText'")
 
         } finally {
-            record.stop()
-            record.release()
-            aec?.release()
-            ns?.release()
             recognizer.close()
         }
 
         return resultText
     }
 
-    /** VAD energy-based minimale, usato SOLO per capire quando l'utente ha
-     *  smesso di parlare — non più per decidere se svegliare un motore. */
-    private fun isLikelyVoice(buffer: ByteArray, length: Int): Boolean {
-        var sumSquares = 0.0
-        var count = 0
-        var i = 0
-        while (i + 1 < length) {
-            val sample = ((buffer[i + 1].toInt() shl 8) or (buffer[i].toInt() and 0xFF)).toShort()
-            sumSquares += sample.toDouble() * sample.toDouble()
-            i += 2
-            count++
+    /** Alimenta Vosk con un chunk e, se il risultato non è finale, aggiorna la UI col parziale. */
+    private fun feedAndUpdatePartial(recognizer: Recognizer, chunk: ByteArray) {
+        val isFinal = recognizer.acceptWaveForm(chunk, chunk.size)
+        if (!isFinal) {
+            val partialJson = recognizer.partialResult
+            val partialText = JSONObject(partialJson).optString("partial", "")
+            if (partialText.isNotEmpty()) {
+                com.example.localvoice.VoiceUIState.transcriptionFlow.value = partialText
+            }
         }
-        if (count == 0) return false
-        val rms = sqrt(sumSquares / count)
-        return rms > ENERGY_THRESHOLD
+    }
+
+    private fun toShortArray(buffer: ByteArray, length: Int): ShortArray {
+        val out = ShortArray(length / 2)
+        var i = 0
+        var j = 0
+        while (i + 1 < length) {
+            out[j] = ((buffer[i + 1].toInt() shl 8) or (buffer[i].toInt() and 0xFF)).toShort()
+            i += 2
+            j++
+        }
+        return out
+    }
+
+    private fun rmsOf(samples: ShortArray): Double {
+        if (samples.isEmpty()) return 0.0
+        var sumSquares = 0.0
+        for (s in samples) sumSquares += s.toDouble() * s.toDouble()
+        return sqrt(sumSquares / samples.size)
     }
 
     private fun extractText(json: String?): String {
@@ -250,7 +247,7 @@ class VoskSttEngine(private val context: Context) : SttEngine {
         private const val SPEECH_START_TIMEOUT_MS = 3000
         private const val SILENCE_END_MS = 1200
         private const val MAX_TOTAL_MS = 8000
-        private const val ENERGY_THRESHOLD = 600.0
+        private const val PRE_ROLL_CHUNKS = 3 // ~300ms di pre-roll prima del trigger VAD
 
         // Vocabolario ristretto per il "grammar mode" — vedi trade-off nella
         // doc della classe sopra. "[unk]" è la convenzione Vosk per "parola

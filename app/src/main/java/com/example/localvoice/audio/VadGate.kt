@@ -14,7 +14,7 @@ package com.example.localvoice.audio
  * ~1MB, inferenza comunque molto economica, ~1ms per chunk su CPU mobile).
  */
 class VadGate(
-    private val energyThreshold: Double = 500.0,
+    private val energyThreshold: Double = 200.0,
     private val adaptiveNoiseFloor: Boolean = true
 ) {
     private var noiseFloor = energyThreshold / 4

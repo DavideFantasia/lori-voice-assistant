@@ -87,16 +87,6 @@ dependencies {
     implementation("androidx.activity:activity-ktx:1.9.2")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
-
-    // Wake-word — 100% offline, nessuna chiave/account richiesti.
-    // Usa ONNX Runtime internamente (dipendenza transitiva).
-    implementation("xyz.rementia:openwakeword:0.1.5")
-    // Forziamo una versione più recente di onnxruntime-android: quella
-    // impacchettata transitivamente dalla libreria potrebbe non essere
-    // allineata a pagine da 16kB (vedi avviso "Compatibilità delle app per
-    // Android" — riguarda le .so native, non il nostro codice). Se il
-    // conflitto di versione causa errori di build, rimuovi questa riga:
-    // l'app funziona comunque, resta solo l'avviso.
     implementation("com.microsoft.onnxruntime:onnxruntime-android:1.22.0")
 
     // STT — 100% offline, modello (~48MB) da scaricare a parte, vedi

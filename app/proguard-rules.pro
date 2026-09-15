@@ -10,16 +10,14 @@
 
 # Mantieni intatte le librerie JNA (necessarie per Vosk)
 -keep class com.sun.jna.** { *; }
+-keep class * implements com.sun.jna.** { *; }
 -keepclassmembers class * extends com.sun.jna.** { *; }
 -dontwarn com.sun.jna.**
 
 # ONNX Runtime (JNI)
 -keep class ai.onnxruntime.** { *; }
+-keepclassmembers class ai.onnxruntime.** { *; }
 -dontwarn ai.onnxruntime.**
-
-# openWakeWord (usa ONNX Runtime + reflection interna)
--keep class com.rementia.openwakeword.** { *; }
--dontwarn com.rementia.openwakeword.**
 
 # Kotlin coroutines — regole standard raccomandate dal progetto kotlinx.coroutines
 -keepnames class kotlinx.coroutines.internal.MainDispatcherFactory {}
