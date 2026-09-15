@@ -7,7 +7,7 @@ progettato per operare **100% on-device** (nessuna API cloud richiesta) e ottimi
 Ideale per sistemi operativi focalizzati sulla privacy come GrapheneOS.
 
 ## Funzionalità Principali
-* **Wake-word offline:** Basato su [openWakeWord](https://github.com/dscripka/openWakeWord) (modelli ONNX).
+* **Wake-word offline:** Basato sulla pipeline di [openWakeWord](https://github.com/dscripka/openWakeWord) (modelli ONNX).
 * **Speech-to-Text (STT) offline:** Basato su [Vosk Android](https://alphacephei.com/vosk/).
 * **Nessun tracciamento:** Nessuna dipendenza da Google Play Services, nessun account richiesto e nessun permesso `INTERNET` nel manifest (eccezione fatta per l'integrazione opzionale con Spotify).
 * **Gestione Audio Indipendente:** Moduli di ascolto continui ed endpointing nativo per un'acquisizione pulita della voce.
