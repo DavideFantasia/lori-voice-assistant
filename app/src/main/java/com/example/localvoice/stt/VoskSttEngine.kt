@@ -254,18 +254,26 @@ class VoskSttEngine(
         // fuori vocabolario", va sempre incluso.
         private val GRAMMAR_JSON: String = buildList {
             addAll(listOf(
+                // Ricerca web
                 "cerca", "trova", "su", "internet", "online", "sul", "web",
-                "imposta", "avvia", "metti", "fai", "partire", "un", "timer", "di",
-                "secondi", "secondo", "minuti", "minuto", "ore", "ora",
-                "accendi", "spegni", "il", "bluetooth",
-                "prossima", "successiva", "canzone", "dopo", "salta", "la", "cambia",
-                "precedente", "prima", "torna", "alla",
-                "pausa", "ferma", "tutto", "silenzio",
-                "volume", "a", "al", "alza", "abbassa",
+                // Timer / Sveglia
+                "imposta", "avvia", "metti", "fai", "partire", "crea", "punta",
+                "un", "una", "timer", "sveglia", "di", "secondi", "secondo", "minuti", "minuto", "ore", "ora",
+                // Bluetooth
+                "accendi", "spegni", "attiva", "disattiva", "il", "bluetooth",
+                // Media
+                "prossima", "successiva", "canzone", "traccia", "dopo", "salta", "la", "cambia", "vai", "avanti",
+                "precedente", "prima", "torna", "indietro", "alla",
+                "pausa", "ferma", "tutto", "musica", "stoppa", "silenzio",
+                "suona", "riproduci", "ascoltiamo", "Caparezza", "Rancore",
+                // Volume
+                "volume", "porta", "a", "al", "alza", "abbassa", "aumenta", "diminuisci",
+                // Numeri
                 "uno", "due", "tre", "quattro", "cinque", "sei", "sette", "otto", "nove", "dieci",
                 "undici", "dodici", "quindici", "venti", "venticinque", "trenta",
                 "quaranta", "quarantacinque", "cinquanta", "sessanta", "settanta",
                 "ottanta", "novanta", "cento",
+                // Sconosciuto (obbligatorio per Vosk)
                 "[unk]"
             ))
         }.distinct().joinToString(", ", prefix = "[", postfix = "]") { "\"$it\"" }

@@ -17,70 +17,55 @@ class CommandParser {
         """(?:cerca|trova)\s+(.+?)\s+(?:su internet|online|sul web)""",
         RegexOption.IGNORE_CASE
     )
+
     private val searchPatternSimple = Regex(
         """(?:cerca|trova)\s+(.+)""",
         RegexOption.IGNORE_CASE
     )
 
-    // Verbi accettati per avviare un timer: imposta / avvia / metti / fai partire.
-    // L'articolo "un" prima di "timer" è opzionale in tutti i casi.
-    // Le forme plurali italiane di queste parole non aggiungono una lettera
-    // (non è "secondo" + "i" opzionale) ma cambiano la vocale finale:
-    // secondo→secondi, minuto→minuti, ora→ore. Vanno quindi elencate come
-    // alternative letterali, non con un "?" su un singolo carattere finale.
     private val timerPattern = Regex(
-        """(?:imposta|avvia|metti|fai partire)(?:\s+un)?\s+timer\s+di\s+(\d+|[a-zà]+)\s*(secondi|secondo|minuti|minuto|ore|ora)""",
+        """(?:(?:imposta|avvia|metti|fai partire|crea|punta)\s+)?(?:(?:un|una)\s+)?(?:timer|sveglia)(?:\s+di)?\s+(\d+|[a-z ]+)\s*(secondi|secondo|minuti|minuto|ore|ora)""",
         RegexOption.IGNORE_CASE
     )
 
     private val bluetoothOnPattern = Regex(
-        """accendi(?:\s+il)?\s+bluetooth""", RegexOption.IGNORE_CASE
+        """(?:accendi|attiva)(?:\s+il)?\s+bluetooth""", RegexOption.IGNORE_CASE
     )
+
     private val bluetoothOffPattern = Regex(
-        """spegni(?:\s+il)?\s+bluetooth""", RegexOption.IGNORE_CASE
+        """(?:spegni|disattiva)(?:\s+il)?\s+bluetooth""", RegexOption.IGNORE_CASE
     )
 
-    // Media: skip traccia. Diverse formulazioni comuni in italiano, incluse
-    // le forme brevi "prossima"/"successiva"/"precedente" da sole — NOTA: a
-    // differenza della versione precedente, qui "precedente"/"successiva"
-    // da sole possono dare falsi positivi su frasi non legate a canzoni
-    // (es. "il giorno precedente"). È un tradeoff esplicito richiesto per
-    // comandi più brevi da pronunciare — se in pratica causa problemi,
-    // restringi di nuovo richiedendo la parola "canzone" accanto.
     private val nextTrackPattern = Regex(
-        """\b(?:prossima|successiva)\b|canzone\s+(?:successiva|dopo)|salta(?:\s+la)?\s+canzone|cambia\s+canzone""",
+        """\b(?:prossima|successiva)\b|(?:canzone|traccia)\s+(?:successiva|dopo)|salta(?:\s+la)?\s+(?:canzone|traccia)|cambia\s+(?:canzone|traccia)|vai\s+avanti""",
         RegexOption.IGNORE_CASE
     )
+
     private val previousTrackPattern = Regex(
-        """\bprecedente\b|canzone\s+(?:di\s+)?prima|torna(?:\s+alla)?\s+canzone\s+precedente""",
+        """\bprecedente\b|(?:canzone|traccia)\s+(?:di\s+)?prima|torna(?:\s+alla)?\s+(?:canzone|traccia)\s+precedente|torna\s+indietro""",
         RegexOption.IGNORE_CASE
     )
+
     private val pauseMediaPattern = Regex(
-        """\bpausa\b|ferma\s+tutto|metti(?:\s+in)?\s+pausa|\bsilenzio\b""",
+        """\bpausa\b|ferma(?:\s+tutto|\s+la\s+musica)?|metti(?:\s+in)?\s+pausa|\bsilenzio\b|stoppa""",
         RegexOption.IGNORE_CASE
     )
 
-    // Volume: sia forma assoluta ("volume al 70") sia relativa ("alza/abbassa il volume").
-    // L'assoluta va controllata PRIMA della relativa, perché altrimenti
-    // "volume" da solo potrebbe essere ambiguo — tenerle come pattern
-    // separati con verbi diversi evita il problema alla radice.
     private val volumeSetPattern = Regex(
-        """volume\s+(?:a|al)?\s*(\d{1,3}|[a-zà]+)\s*%?""",
+        """(?:porta\s+il\s+)?volume\s+(?:a|al)?\s*(\d{1,3}|[a-z ]+)\s*%?""",
         RegexOption.IGNORE_CASE
     )
+
     private val volumeUpPattern = Regex(
-        """alza(?:\s+il)?\s+volume""", RegexOption.IGNORE_CASE
-    )
-    private val volumeDownPattern = Regex(
-        """abbassa(?:\s+il)?\s+volume""", RegexOption.IGNORE_CASE
+        """(?:alza|aumenta)(?:\s+il)?\s+volume""", RegexOption.IGNORE_CASE
     )
 
-    // Spotify: "metti %s" — usa lo stesso verbo di timer/pausa, quindi va
-    // controllato DOPO quei due pattern in parse(), altrimenti "metti in
-    // pausa" o "metti un timer di 5 minuti" verrebbero interpretati come
-    // ricerche musicali letterali invece che come i comandi giusti.
+    private val volumeDownPattern = Regex(
+        """(?:abbassa|diminuisci)(?:\s+il)?\s+volume""", RegexOption.IGNORE_CASE
+    )
+
     private val playMusicPattern = Regex(
-        """metti\s+(.+)""", RegexOption.IGNORE_CASE
+        """(?:metti|suona|riproduci|ascoltiamo)\s+(.+)""", RegexOption.IGNORE_CASE
     )
 
     // Numeri scritti a parole più comuni per un timer vocale — copre i casi
