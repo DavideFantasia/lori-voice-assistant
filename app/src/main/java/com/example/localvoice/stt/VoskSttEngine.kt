@@ -18,44 +18,6 @@ import java.io.IOException
 import java.util.ArrayDeque
 import kotlin.math.sqrt
 
-/**
- * Wrapper su Vosk Android SDK (Apache 2.0, alphacephei) — API LOW-LEVEL
- * (Recognizer.acceptWaveForm), non più SpeechService.
- *
- * BUFFER AUDIO CONDIVISO: questa classe non apre più un proprio
- * AudioRecord. Usa [SharedAudioSource] — un solo microfono per questa
- * fase — e legge da lì gli stessi chunk sia per decidere con [VadGate]
- * quando l'utente inizia/smette di parlare, sia per alimentare il
- * riconoscitore Vosk. Prima le due cose (rilevazione voce e STT)
- * avrebbero potuto competere per il microfono se fatte da componenti
- * separati con un proprio AudioRecord ciascuno; ora leggono lo stesso
- * chunk nello stesso ciclo.
- *
- * PRE-ROLL: dato che il VAD ha una piccola latenza di rilevamento (serve
- * qualche chunk perché l'energia superi la soglia), teniamo un buffer
- * circolare dei chunk più recenti PRIMA che parta il parlato, e li
- * "svuotiamo" dentro Vosk non appena il VAD dichiara che si sta parlando
- * — così non perdiamo la prima sillaba. Prima che il parlato inizi, i
- * chunk NON vengono passati a Vosk (risparmio di decoding su puro
- * silenzio); vengono passati solo dal momento in cui il VAD conferma voce.
- *
- * TRADE-OFF IMPORTANTE — grammar mode: per aumentare l'accuratezza sui
- * comandi fissi (bluetooth, timer, volume, media), vincoliamo Vosk a un
- * vocabolario ristretto (vedi GRAMMAR_JSON). Questo però rende ANCHE la
- * ricerca web meno affidabile: una query libera come "cerca ricette di
- * pasta" verrà in gran parte trascritta come "[unk]" per le parole fuori
- * vocabolario, perché il decoder non può fisicamente restituire parole non
- * elencate. È un compromesso deliberato — se la ricerca web ti serve più
- * dell'accuratezza sui comandi fissi, valuta di rimuovere il parametro
- * grammar dal costruttore di Recognizer sotto (torna a riconoscimento a
- * vocabolario pieno, meno preciso su tutto ma senza questo limite).
- *
- * COSA DEVI PROCURARTI TU (invariato rispetto a prima):
- * 1. Modello italiano "small" da https://alphacephei.com/vosk/models
- * 2. Copiato in app/src/main/assets/model-it-small/
- * 3. Con un file "uuid" aggiunto a mano dentro quella cartella (vedi note
- *    precedenti — particolarità nota di StorageService.unpack()).
- */
 class VoskSttEngine(
     private val context: Context,
     private val sharedMic: SharedAudioSource
@@ -67,16 +29,23 @@ class VoskSttEngine(
     private var captureJob: kotlinx.coroutines.Job? = null
 
     override fun load() {
+        if (cachedModel != null) {
+            model = cachedModel
+            Log.d(TAG, "Modello Vosk recuperato istantaneamente dalla cache in RAM")
+            return
+        }
+
         StorageService.unpack(
             context,
             MODEL_ASSET_PATH,
             "model",
             { loadedModel: Model ->
+                cachedModel = loadedModel
                 model = loadedModel
-                Log.d(TAG, "Modello Vosk caricato correttamente")
+                Log.d(TAG, "Modello Vosk caricato correttamente dal disco")
             },
             { exception: IOException ->
-                Log.e(TAG, "Impossibile caricare il modello Vosk da assets/$MODEL_ASSET_PATH — hai copiato la cartella del modello (e il file uuid)? Vedi doc di questa classe.", exception)
+                Log.e(TAG, "Impossibile caricare il modello Vosk da assets", exception)
             }
         )
     }
@@ -84,7 +53,7 @@ class VoskSttEngine(
     override fun startListening(onFinalResult: (String) -> Unit) {
         val m = model
         if (m == null) {
-            Log.w(TAG, "startListening chiamato ma il modello non è pronto: rispondo con testo vuoto")
+            Log.w(TAG, "startListening chiamato ma il modello non è pronto")
             onFinalResult("")
             return
         }
@@ -112,30 +81,24 @@ class VoskSttEngine(
     }
 
     private suspend fun captureAndRecognize(model: Model): String {
-        // NB: se il costruttore a 3 argomenti con grammar non risolve in
-        // fase di compilazione, la tua versione di vosk-android potrebbe
-        // esporlo con un nome diverso — stesso approccio di sempre: mandami
-        // l'errore e/o il sorgente reale della classe Recognizer, lo
-        // correggiamo mirato invece di indovinare alla cieca.
-        val recognizer = Recognizer(model, SAMPLE_RATE, GRAMMAR_JSON)
-        val vad = VadGate()
-        // NB: sharedMic è già aperto e gestito dal servizio per tutta la sua
-        // vita (vedi ListeningForegroundService) — qui lo leggiamo soltanto,
-        // non lo apriamo né lo chiudiamo.
+        // 1. Creiamo ENTRAMBI i motori
+        val recognizerGrammar = Recognizer(model, SAMPLE_RATE, GRAMMAR_JSON)
+        val recognizerOpen = Recognizer(model, SAMPLE_RATE)
 
-        // Buffer circolare dei chunk pre-parlato: ~PRE_ROLL_CHUNKS * 100ms.
+        val vad = VadGate()
         val preRoll = ArrayDeque<ByteArray>()
 
         var resultText = ""
+        var useOpenMode = false // Flag per lo switch dinamico
+
         try {
             val buffer = ByteArray(CHUNK_SIZE_BYTES)
             var silenceChunks = 0
             var waitChunks = 0
             var totalChunks = 0
             var speechStarted = false
-            val chunkMs = (CHUNK_SIZE_BYTES / 2) * 1000 / SAMPLE_RATE.toInt() // 2 byte per campione 16-bit
+            val chunkMs = (CHUNK_SIZE_BYTES / 2) * 1000 / SAMPLE_RATE.toInt()
 
-            // reset UI di trascrizione
             com.example.localvoice.VoiceUIState.reset()
 
             while (currentCoroutineContext().isActive) {
@@ -145,70 +108,90 @@ class VoskSttEngine(
                 val chunk = buffer.copyOf(read)
                 val pcm = toShortArray(chunk, read)
 
-                // 1. RMS per l'indicatore audio lineare (UI) — invariato
                 val rms = rmsOf(pcm)
                 val normalizedVolume = ((rms / 10000.0) * 1.5).toFloat().coerceIn(0f, 1f)
                 com.example.localvoice.VoiceUIState.audioVolumeFlow.value = normalizedVolume
 
-                // 2. Decisione di attività vocale — ora delegata al VAD condiviso,
-                //    non più ricalcolata separatamente dentro questa classe.
                 val voice = vad.isVoiceLikely(pcm)
                 totalChunks++
 
                 if (!speechStarted) {
-                    // Ancora silenzio: bufferizza per il pre-roll, NON alimentare
-                    // ancora Vosk (risparmio di decoding sul silenzio puro).
                     preRoll.addLast(chunk)
                     if (preRoll.size > PRE_ROLL_CHUNKS) preRoll.removeFirst()
 
                     if (voice) {
                         speechStarted = true
                         silenceChunks = 0
-                        // Svuota il pre-roll dentro Vosk PRIMA di processare il
-                        // chunk corrente, per non perdere l'inizio del parlato.
-                        for (p in preRoll) recognizer.acceptWaveForm(p, p.size)
+                        // Alimentiamo entrambi i motori con il pre-roll
+                        for (p in preRoll) {
+                            recognizerGrammar.acceptWaveForm(p, p.size)
+                            recognizerOpen.acceptWaveForm(p, p.size)
+                        }
                         preRoll.clear()
-                        feedAndUpdatePartial(recognizer, chunk)
+                        useOpenMode = updatePartialsAndCheckSwitch(recognizerGrammar, recognizerOpen, chunk, useOpenMode)
                     } else {
                         waitChunks++
                         if (waitChunks * chunkMs > SPEECH_START_TIMEOUT_MS) break
                         continue
                     }
                 } else {
-                    feedAndUpdatePartial(recognizer, chunk)
+                    // Alimentiamo entrambi i motori in tempo reale
+                    useOpenMode = updatePartialsAndCheckSwitch(recognizerGrammar, recognizerOpen, chunk, useOpenMode)
+
                     if (voice) silenceChunks = 0 else silenceChunks++
                     if (silenceChunks * chunkMs > SILENCE_END_MS) break
                 }
-
                 if (totalChunks * chunkMs > MAX_TOTAL_MS) break
             }
 
-            // 3. Estrai e visualizza il testo finale conclusivo
-            resultText = extractText(recognizer.finalResult)
+            // 2. Estraiamo il risultato finale dal motore appropriato
+            resultText = if (useOpenMode) {
+                extractText(recognizerOpen.finalResult)
+            } else {
+                extractText(recognizerGrammar.finalResult)
+            }
+
             com.example.localvoice.VoiceUIState.transcriptionFlow.value = resultText
-
-            // Azzera il volume quando l'ascolto termina
             com.example.localvoice.VoiceUIState.audioVolumeFlow.value = 0f
-
-            Log.d(TAG, "Testo riconosciuto: '$resultText'")
+            Log.d(TAG, "Testo riconosciuto (OpenMode=$useOpenMode): '$resultText'")
 
         } finally {
-            recognizer.close()
+            // Chiudiamo entrambi per liberare memoria
+            recognizerGrammar.close()
+            recognizerOpen.close()
         }
 
         return resultText
     }
 
-    /** Alimenta Vosk con un chunk e, se il risultato non è finale, aggiorna la UI col parziale. */
-    private fun feedAndUpdatePartial(recognizer: Recognizer, chunk: ByteArray) {
-        val isFinal = recognizer.acceptWaveForm(chunk, chunk.size)
-        if (!isFinal) {
-            val partialJson = recognizer.partialResult
-            val partialText = JSONObject(partialJson).optString("partial", "")
-            if (partialText.isNotEmpty()) {
-                com.example.localvoice.VoiceUIState.transcriptionFlow.value = partialText
+    private fun updatePartialsAndCheckSwitch(
+        recognizerGrammar: Recognizer,
+        recognizerOpen: Recognizer,
+        chunk: ByteArray,
+        currentlyOpen: Boolean
+    ): Boolean {
+        recognizerGrammar.acceptWaveForm(chunk, chunk.size)
+        recognizerOpen.acceptWaveForm(chunk, chunk.size)
+
+        var isNowOpen = currentlyOpen
+        val activeRecognizer = if (isNowOpen) recognizerOpen else recognizerGrammar
+
+        val partialJson = activeRecognizer.partialResult
+        val partialText = JSONObject(partialJson).optString("partial", "")
+
+        if (partialText.isNotEmpty()) {
+            com.example.localvoice.VoiceUIState.transcriptionFlow.value = partialText
+
+            // Controlla se scatta la trappola per aprire il vocabolario
+            if (!isNowOpen) {
+                val triggerWords = listOf("cerca", "trova", "metti", "suona", "riproduci", "ascoltiamo")
+                if (triggerWords.any { partialText.contains(it) }) {
+                    Log.d(TAG, "Parola chiave aperta rilevata: switch al vocabolario libero!")
+                    isNowOpen = true
+                }
             }
         }
+        return isNowOpen
     }
 
     private fun toShortArray(buffer: ByteArray, length: Int): ShortArray {
@@ -243,37 +226,29 @@ class VoskSttEngine(
         private const val TAG = "LocalVoiceVosk"
         private const val SAMPLE_RATE = 16000.0f
         private const val MODEL_ASSET_PATH = "model-it-small"
-        private const val CHUNK_SIZE_BYTES = 3200 // ~100ms a 16kHz, PCM 16-bit mono
+        private const val CHUNK_SIZE_BYTES = 3200
         private const val SPEECH_START_TIMEOUT_MS = 3000
         private const val SILENCE_END_MS = 1200
         private const val MAX_TOTAL_MS = 8000
-        private const val PRE_ROLL_CHUNKS = 3 // ~300ms di pre-roll prima del trigger VAD
+        private const val PRE_ROLL_CHUNKS = 3
 
-        // Vocabolario ristretto per il "grammar mode" — vedi trade-off nella
-        // doc della classe sopra. "[unk]" è la convenzione Vosk per "parola
-        // fuori vocabolario", va sempre incluso.
+        private var cachedModel: Model? = null
+
         private val GRAMMAR_JSON: String = buildList {
             addAll(listOf(
-                // Ricerca web
                 "cerca", "trova", "su", "internet", "online", "sul", "web",
-                // Timer / Sveglia
                 "imposta", "avvia", "metti", "fai", "partire", "crea", "punta",
                 "un", "una", "timer", "sveglia", "di", "secondi", "secondo", "minuti", "minuto", "ore", "ora",
-                // Bluetooth
                 "accendi", "spegni", "attiva", "disattiva", "il", "bluetooth",
-                // Media
                 "prossima", "successiva", "canzone", "traccia", "dopo", "salta", "la", "cambia", "vai", "avanti",
                 "precedente", "prima", "torna", "indietro", "alla",
                 "pausa", "ferma", "tutto", "musica", "stoppa", "silenzio",
-                "suona", "riproduci", "ascoltiamo", "Caparezza", "Rancore",
-                // Volume
+                "suona", "riproduci", "ascoltiamo",
                 "volume", "porta", "a", "al", "alza", "abbassa", "aumenta", "diminuisci",
-                // Numeri
                 "uno", "due", "tre", "quattro", "cinque", "sei", "sette", "otto", "nove", "dieci",
                 "undici", "dodici", "quindici", "venti", "venticinque", "trenta",
                 "quaranta", "quarantacinque", "cinquanta", "sessanta", "settanta",
                 "ottanta", "novanta", "cento",
-                // Sconosciuto (obbligatorio per Vosk)
                 "[unk]"
             ))
         }.distinct().joinToString(", ", prefix = "[", postfix = "]") { "\"$it\"" }
