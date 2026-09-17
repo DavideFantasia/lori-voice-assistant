@@ -24,7 +24,7 @@ class CommandParser {
     )
 
     private val timerPattern = Regex(
-        """(?:(?:imposta|avvia|metti|fai partire|crea|punta)\s+)?(?:(?:un|una)\s+)?(?:timer|sveglia)(?:\s+di)?\s+(\d+|[a-z ]+)\s*(secondi|secondo|minuti|minuto|ore|ora)""",
+        """(?:(?:imposta|avvia|metti|fai partire|crea|punta)\s+)?(?:(?:un|una)\s+)?(?:timer|sveglia)(?:\s+di)?\s+(\d+|[a-z]+)\s*(secondi|secondo|minuti|minuto|ore|ora)""",
         RegexOption.IGNORE_CASE
     )
 
@@ -52,7 +52,7 @@ class CommandParser {
     )
 
     private val volumeSetPattern = Regex(
-        """(?:porta\s+il\s+)?volume\s+(?:a|al)?\s*(\d{1,3}|[a-z ]+)\s*%?""",
+        """(?:porta\s+il\s+)?volume\s+(?:a|al)?\s*(\d{1,3}|[a-z]+)\s*%?""",
         RegexOption.IGNORE_CASE
     )
 
@@ -83,8 +83,9 @@ class CommandParser {
     )
 
     private fun parseAmount(raw: String): Long? {
-        raw.toLongOrNull()?.let { return it }
-        return wordToNumber[raw.lowercase()]?.toLong()
+        val trimmed = raw.trim()
+        trimmed.toLongOrNull()?.let { return it }
+        return wordToNumber[trimmed.lowercase()]?.toLong()
     }
 
     fun parse(rawText: String): VoiceIntent {

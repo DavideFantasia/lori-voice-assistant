@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Avvolgiamo i path in un group per scalarli e centrarli facilmente -->
+    <group
+        android:pivotX="54"
+        android:pivotY="54"
+        android:scaleX="1.90"
+        android:scaleY="1.90"
+        android:translateY="2.5">
+
+        <!-- Gambo della "L" -->
+        <path
+            android:fillColor="#009488"
+            android:pathData="M34,29 a4,4 0,0 1,4,-4 h0 a4,4 0,0 1,4,4 v45 a4,4 0,0 1,-4,4 h0 a4,4 0,0 1,-4,-4 Z" />
+        <!-- Barra centrale (equalizzatore) -->
+        <path
+            android:fillColor="#009488"
+            android:pathData="M52,60 a3,3 0,0 1,3,-3 h1 a3,3 0,0 1,3,3 v15 a3,3 0,0 1,-3,3 h-1 a3,3 0,0 1,-3,-3 Z" />
+        <!-- Barra corta -->
+        <path
+            android:fillColor="#009488"
+            android:pathData="M67,69 a3,3 0,0 1,3,-3 h1 a3,3 0,0 1,3,3 v6 a3,3 0,0 1,-3,3 h-1 a3,3 0,0 1,-3,-3 Z" />
+
+    </group>
+</vector>

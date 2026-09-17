@@ -95,6 +95,17 @@
                 <action android:name="android.speech.RecognitionService" />
             </intent-filter>
         </service>
+        <!-- Tile Custom per le Quick Settings per attivare/disattivare l'ascolto passivo -->
+        <service
+            android:name=".service.ListeningTileService"
+            android:label="Lori In Ascolto"
+            android:icon="@drawable/ic_tile_lori"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+        </service>
 
         <!-- Foreground service: ascolto continuo VAD + wake-word a basso consumo -->
         <service

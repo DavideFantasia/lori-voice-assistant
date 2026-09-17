@@ -33,6 +33,7 @@ import android.content.SharedPreferences
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.runtime.DisposableEffect
 // ============================
 
 /**
@@ -216,7 +217,7 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 fun MainScreen(
-    initialListeningState: Boolean, // Nuovo parametro
+    initialListeningState: Boolean,
     onToggleListening: (Boolean) -> Unit,
     useSystemTheme: Boolean,
     onThemeChange: (Boolean) -> Unit
@@ -225,6 +226,27 @@ fun MainScreen(
     var ttsEngineName by remember { mutableStateOf("Verifica in corso...") }
     val context = LocalContext.current
     var showSettings by remember { mutableStateOf(false) }
+
+    DisposableEffect(context) {
+        val prefs = context.getSharedPreferences("lori_prefs", Context.MODE_PRIVATE)
+
+        val listener = SharedPreferences.OnSharedPreferenceChangeListener { sharedPrefs, key ->
+            if (key == "is_listening_enabled") {
+                // Aggiorna lo stato di Compose se la preferenza cambia da un'altra parte (es. Quick Settings)
+                isListeningEnabled = sharedPrefs.getBoolean(key, false)
+            }
+        }
+
+        prefs.registerOnSharedPreferenceChangeListener(listener)
+
+        // Sincronizza subito lo stato in caso sia cambiato mentre l'app era in pausa
+        isListeningEnabled = prefs.getBoolean("is_listening_enabled", false)
+
+        onDispose {
+            // Rimuove l'ascoltatore per evitare memory leak quando il composable viene distrutto
+            prefs.unregisterOnSharedPreferenceChangeListener(listener)
+        }
+    }
 
     // Recupera dinamicamente il nome del TTS al primo avvio della UI
     LaunchedEffect(Unit) {
