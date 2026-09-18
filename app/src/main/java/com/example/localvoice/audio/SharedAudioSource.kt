@@ -55,15 +55,25 @@ class SharedAudioSource(
         // dell'AudioRecord in questa fase — stesso motivo per cui prima
         // era VoskSttEngine ad aprirlo direttamente.
         aec = if (AcousticEchoCanceler.isAvailable()) {
-            AcousticEchoCanceler.create(r.audioSessionId)?.apply { enabled = true }
+            AcousticEchoCanceler.create(r.audioSessionId)?.apply { enabled = false }
         } else null
         ns = if (NoiseSuppressor.isAvailable()) {
-            NoiseSuppressor.create(r.audioSessionId)?.apply { enabled = true }
+            NoiseSuppressor.create(r.audioSessionId)?.apply { enabled = false }
         } else null
 
         r.startRecording()
         record = r
         Log.d(TAG, "Microfono condiviso aperto: AEC disponibile=${aec != null}, NS disponibile=${ns != null}")
+    }
+    // aggiorna sull'uso della soppressione del rumore
+    fun setEnhancementsEnabled(enable: Boolean) {
+        try {
+            aec?.enabled = enable
+            ns?.enabled = enable
+            // Log.d(TAG, "Effetti hardware AEC/NS impostati su: $enable")
+        } catch (e: Exception) {
+            Log.e(TAG, "Errore nel toggle degli effetti hardware", e)
+        }
     }
 
     /**

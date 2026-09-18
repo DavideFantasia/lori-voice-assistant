@@ -160,8 +160,8 @@ class LocalKeywordSpotter(
 
     override fun reset() {
         rawAccumulator.clear()
-        melBuffer.clear()
-        embBuffer.clear()
+        melBuffer.clear() // In teoria si sovrascrivono essendo una window circolare
+        embBuffer.clear() // Resettare così causa solo un cold start ad ogni frase
         lookback = ShortArray(LOOKBACK_SAMPLES)
     }
 

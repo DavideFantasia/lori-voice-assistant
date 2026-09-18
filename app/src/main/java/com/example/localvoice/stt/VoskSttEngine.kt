@@ -24,6 +24,8 @@ class VoskSttEngine(
 ) : SttEngine {
 
     private var model: Model? = null
+    private var recognizerGrammar: Recognizer? = null
+    private var recognizerOpen: Recognizer? = null
     private val job = Job()
     private val scope = CoroutineScope(Dispatchers.Default + job)
     private var captureJob: kotlinx.coroutines.Job? = null
@@ -31,6 +33,8 @@ class VoskSttEngine(
     override fun load() {
         if (cachedModel != null) {
             model = cachedModel
+            recognizerGrammar = cachedRecognizerGrammar
+            recognizerOpen = cachedRecognizerOpen
             Log.d(TAG, "Modello Vosk recuperato istantaneamente dalla cache in RAM")
             return
         }
@@ -42,6 +46,13 @@ class VoskSttEngine(
             { loadedModel: Model ->
                 cachedModel = loadedModel
                 model = loadedModel
+
+                recognizerGrammar = Recognizer(loadedModel, SAMPLE_RATE, GRAMMAR_JSON)
+                recognizerOpen = Recognizer(loadedModel, SAMPLE_RATE)
+
+                cachedRecognizerGrammar = recognizerGrammar
+                cachedRecognizerOpen = recognizerOpen
+
                 Log.d(TAG, "Modello Vosk caricato correttamente dal disco")
             },
             { exception: IOException ->
@@ -76,122 +87,139 @@ class VoskSttEngine(
 
     override fun release() {
         stopListening()
+
+        recognizerGrammar = null
+        recognizerOpen = null
+
         model = null
         job.cancel()
     }
 
     private suspend fun captureAndRecognize(model: Model): String {
-        // 1. Creiamo ENTRAMBI i motori
-        val recognizerGrammar = Recognizer(model, SAMPLE_RATE, GRAMMAR_JSON)
-        val recognizerOpen = Recognizer(model, SAMPLE_RATE)
+        val recGrammar = recognizerGrammar ?: return ""
+        val recOpen = recognizerOpen ?: return ""
+
+        // Reset istantaneo per pulire l'audio del comando precedente
+        recGrammar.reset()
+        recOpen.reset()
 
         val vad = VadGate()
         val preRoll = ArrayDeque<ByteArray>()
+        val utteranceBuffer = mutableListOf<ByteArray>()
 
         var resultText = ""
-        var useOpenMode = false // Flag per lo switch dinamico
+        var finalCapturedText = "" // testo intercettato
+        var useOpenMode = false
 
-        try {
-            val buffer = ByteArray(CHUNK_SIZE_BYTES)
-            var silenceChunks = 0
-            var waitChunks = 0
-            var totalChunks = 0
-            var speechStarted = false
-            val chunkMs = (CHUNK_SIZE_BYTES / 2) * 1000 / SAMPLE_RATE.toInt()
+        val buffer = ByteArray(CHUNK_SIZE_BYTES)
+        var silenceChunks = 0
+        var waitChunks = 0
+        var totalChunks = 0
+        var speechStarted = false
+        val chunkMs = (CHUNK_SIZE_BYTES / 2) * 1000 / SAMPLE_RATE.toInt()
 
-            com.example.localvoice.VoiceUIState.reset()
+        com.example.localvoice.VoiceUIState.reset()
 
-            while (currentCoroutineContext().isActive) {
-                val read = sharedMic.readChunk(buffer)
-                if (read <= 0) continue
+        while (currentCoroutineContext().isActive) {
+            val read = sharedMic.readChunk(buffer)
+            if (read <= 0) continue
 
-                val chunk = buffer.copyOf(read)
-                val pcm = toShortArray(chunk, read)
+            val chunk = buffer.copyOf(read)
+            val pcm = toShortArray(chunk, read)
 
-                val rms = rmsOf(pcm)
-                val normalizedVolume = ((rms / 10000.0) * 1.5).toFloat().coerceIn(0f, 1f)
-                com.example.localvoice.VoiceUIState.audioVolumeFlow.value = normalizedVolume
+            val rms = rmsOf(pcm)
+            val normalizedVolume = ((rms / 10000.0) * 1.5).toFloat().coerceIn(0f, 1f)
+            com.example.localvoice.VoiceUIState.audioVolumeFlow.value = normalizedVolume
 
-                val voice = vad.isVoiceLikely(pcm)
-                totalChunks++
+            val voice = vad.isVoiceLikely(pcm)
+            totalChunks++
 
-                if (!speechStarted) {
-                    preRoll.addLast(chunk)
-                    if (preRoll.size > PRE_ROLL_CHUNKS) preRoll.removeFirst()
+            if (!speechStarted) {
+                preRoll.addLast(chunk)
+                if (preRoll.size > PRE_ROLL_CHUNKS) preRoll.removeFirst()
 
-                    if (voice) {
-                        speechStarted = true
-                        silenceChunks = 0
-                        // Alimentiamo entrambi i motori con il pre-roll
-                        for (p in preRoll) {
-                            recognizerGrammar.acceptWaveForm(p, p.size)
-                            recognizerOpen.acceptWaveForm(p, p.size)
+                if (voice) {
+                    speechStarted = true
+                    silenceChunks = 0
+
+                    // Alimentiamo il motore a grammatica
+                    for (p in preRoll) {
+                        utteranceBuffer.add(p)
+                        // SALVAVITA: svuota lo stato nativo se Vosk chiude un blocco
+                        if (recGrammar.acceptWaveForm(p, p.size)) {
+                            finalCapturedText = extractText(recGrammar.result)
+                            //recGrammar.result
                         }
-                        preRoll.clear()
-                        useOpenMode = updatePartialsAndCheckSwitch(recognizerGrammar, recognizerOpen, chunk, useOpenMode)
-                    } else {
-                        waitChunks++
-                        if (waitChunks * chunkMs > SPEECH_START_TIMEOUT_MS) break
-                        continue
+                    }
+                    preRoll.clear()
+                    useOpenMode = checkSwitchToOpen(recGrammar)
+                } else {
+                    waitChunks++
+                    if (waitChunks * chunkMs > SPEECH_START_TIMEOUT_MS) break
+                    continue
+                }
+            } else {
+                if (!useOpenMode) {
+                    // MODO GRAMMATICA
+                    utteranceBuffer.add(chunk)
+                    if (recGrammar.acceptWaveForm(chunk, chunk.size)) {
+                        finalCapturedText = extractText(recGrammar.result)
+                        break
+                    }
+                    useOpenMode = checkSwitchToOpen(recGrammar)
+
+                    if (useOpenMode) {
+                        Log.d(TAG, "Switch al modello aperto! Recupero ${utteranceBuffer.size} chunk audio...")
+                        // CATCH-UP SUI CHUNK ACCUMULATI
+                        for (c in utteranceBuffer) {
+                            if (recOpen.acceptWaveForm(c, c.size)) {
+                                finalCapturedText = extractText(recOpen.result) // SALVAVITA: impedisce il SIGSEGV
+                            }
+                        }
+                        utteranceBuffer.clear()
                     }
                 } else {
-                    // Alimentiamo entrambi i motori in tempo reale
-                    useOpenMode = updatePartialsAndCheckSwitch(recognizerGrammar, recognizerOpen, chunk, useOpenMode)
-
-                    if (voice) silenceChunks = 0 else silenceChunks++
-                    if (silenceChunks * chunkMs > SILENCE_END_MS) break
+                    // MODO APERTO
+                    if (recOpen.acceptWaveForm(chunk, chunk.size)) {
+                        finalCapturedText = extractText(recOpen.result)// SALVAVITA
+                        break
+                    }
+                    val partialText = JSONObject(recOpen.partialResult).optString("partial", "")
+                    if (partialText.isNotEmpty()) {
+                        com.example.localvoice.VoiceUIState.transcriptionFlow.value = partialText
+                    }
                 }
-                if (totalChunks * chunkMs > MAX_TOTAL_MS) break
+
+                if (voice) silenceChunks = 0 else silenceChunks++
+                if (silenceChunks * chunkMs > SILENCE_END_MS) break
             }
-
-            // 2. Estraiamo il risultato finale dal motore appropriato
-            resultText = if (useOpenMode) {
-                extractText(recognizerOpen.finalResult)
-            } else {
-                extractText(recognizerGrammar.finalResult)
-            }
-
-            com.example.localvoice.VoiceUIState.transcriptionFlow.value = resultText
-            com.example.localvoice.VoiceUIState.audioVolumeFlow.value = 0f
-            Log.d(TAG, "Testo riconosciuto (OpenMode=$useOpenMode): '$resultText'")
-
-        } finally {
-            // Chiudiamo entrambi per liberare memoria
-            recognizerGrammar.close()
-            recognizerOpen.close()
+            if (totalChunks * chunkMs > MAX_TOTAL_MS) break
         }
+
+        // Estrazione testo finale
+        resultText = if (finalCapturedText.isNotEmpty()) {
+            finalCapturedText
+        } else {
+            if (useOpenMode) extractText(recOpen.finalResult) else extractText(recGrammar.finalResult)
+        }
+
+        com.example.localvoice.VoiceUIState.transcriptionFlow.value = resultText
+        com.example.localvoice.VoiceUIState.audioVolumeFlow.value = 0f
+        Log.d(TAG, "Testo riconosciuto (OpenMode=$useOpenMode): '$resultText'")
 
         return resultText
     }
 
-    private fun updatePartialsAndCheckSwitch(
-        recognizerGrammar: Recognizer,
-        recognizerOpen: Recognizer,
-        chunk: ByteArray,
-        currentlyOpen: Boolean
-    ): Boolean {
-        recognizerGrammar.acceptWaveForm(chunk, chunk.size)
-        recognizerOpen.acceptWaveForm(chunk, chunk.size)
-
-        var isNowOpen = currentlyOpen
-        val activeRecognizer = if (isNowOpen) recognizerOpen else recognizerGrammar
-
-        val partialJson = activeRecognizer.partialResult
-        val partialText = JSONObject(partialJson).optString("partial", "")
-
+    private fun checkSwitchToOpen(recGrammar: Recognizer): Boolean {
+        val partialText = JSONObject(recGrammar.partialResult).optString("partial", "")
         if (partialText.isNotEmpty()) {
             com.example.localvoice.VoiceUIState.transcriptionFlow.value = partialText
-
-            // Controlla se scatta la trappola per aprire il vocabolario
-            if (!isNowOpen) {
-                val triggerWords = listOf("cerca", "trova", "metti", "suona", "riproduci", "ascoltiamo")
-                if (triggerWords.any { partialText.contains(it) }) {
-                    Log.d(TAG, "Parola chiave aperta rilevata: switch al vocabolario libero!")
-                    isNowOpen = true
-                }
+            val triggerWords = listOf("cerca", "trova", "metti", "suona", "riproduci", "ascoltiamo")
+            if (triggerWords.any { partialText.contains(it) }) {
+                return true
             }
         }
-        return isNowOpen
+        return false
     }
 
     private fun toShortArray(buffer: ByteArray, length: Int): ShortArray {
@@ -227,12 +255,14 @@ class VoskSttEngine(
         private const val SAMPLE_RATE = 16000.0f
         private const val MODEL_ASSET_PATH = "model-it-small"
         private const val CHUNK_SIZE_BYTES = 3200
-        private const val SPEECH_START_TIMEOUT_MS = 3000
+        private const val SPEECH_START_TIMEOUT_MS = 2500
         private const val SILENCE_END_MS = 1200
         private const val MAX_TOTAL_MS = 8000
         private const val PRE_ROLL_CHUNKS = 3
 
         private var cachedModel: Model? = null
+        private var cachedRecognizerGrammar: Recognizer? = null
+        private var cachedRecognizerOpen: Recognizer? = null
 
         private val GRAMMAR_JSON: String = buildList {
             addAll(listOf(

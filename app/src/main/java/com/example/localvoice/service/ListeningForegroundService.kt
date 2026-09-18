@@ -84,6 +84,9 @@ class ListeningForegroundService : Service() {
     private val scope = CoroutineScope(Dispatchers.Default + job)
     private var keywordSpotJob: Job? = null
 
+    private lateinit var audioManager: android.media.AudioManager //per chiedere ad android se ci sono media in riproduzione
+    private var audioFocusRequest: android.media.AudioFocusRequest? = null
+
     // true mentre VoskSttEngine sta catturando un comando: il ciclo di
     // keyword-spotting smette di leggere dal microfono condiviso finché
     // non torna false (vedi NOTA SUL MUTEX DI LETTURA sopra).
@@ -100,7 +103,7 @@ class ListeningForegroundService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-
+        audioManager = getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
         sharedMic = SharedAudioSource(SAMPLE_RATE, CHUNK_SIZE_BYTES)
 
         // Nome del file .onnx della keyword — "hey_lori_it.onnx" è il nome
@@ -177,26 +180,70 @@ class ListeningForegroundService : Service() {
     private fun startKeywordSpotLoop() {
         keywordSpotJob = scope.launch {
             val buffer = ByteArray(CHUNK_SIZE_BYTES)
+            val preRollChunks = java.util.ArrayDeque<ShortArray>()
+            var wasVoiceLikely = false
+            var silenceCounter = 0
+            var mediaCheckCounter = 0 // contatore per il controllo dei media (e successivo noise cancelling)
             while (isActive) {
                 if (capturingCommand.get()) {
-                    // Vosk sta leggendo dallo stesso microfono: non
-                    // chiamiamo readChunk() per non entrare in contesa
-                    // (vedi NOTA SUL MUTEX DI LETTURA nella doc di classe).
-                    delay(50)
+                    delay(200)
                     continue
+                }
+
+                mediaCheckCounter++
+                if (mediaCheckCounter >= 10) {
+                    mediaCheckCounter = 0
+                    // Accende l'AEC in background SOLO se c'è audio in riproduzione
+                    val isMediaPlaying = audioManager.isMusicActive
+                    sharedMic.setEnhancementsEnabled(isMediaPlaying)
                 }
 
                 val read = sharedMic.readChunk(buffer)
                 if (read <= 0) continue
 
                 val pcm = toShortArray(buffer, read)
-                if (!vad.isVoiceLikely(pcm)) continue
+                val isVoice = vad.isVoiceLikely(pcm)
 
-                val score = keywordSpotter.processChunk(pcm)
-                if (score != null) {
-                    Log.d(TAG, "Inferenza ONNX completata, score: $score")
-                    if (keywordSpotter.checkDetection(score)) {
-                        onWakeWordDetected()
+                if (isVoice) {
+                    silenceCounter = 0 // Azzera il timer del silenzio
+
+                    if (!wasVoiceLikely) {
+                        Log.d(TAG, "VAD scattato: inietto ${preRollChunks.size} chunk di pre-roll")
+                        while (preRollChunks.isNotEmpty()) {
+                            keywordSpotter.processChunk(preRollChunks.removeFirst())
+                        }
+                        wasVoiceLikely = true
+                    }
+                } else {
+                    if (wasVoiceLikely) {
+                        silenceCounter++
+                        // Resetta il KWS solo se il silenzio persiste per più di 1 secondo
+                        if (silenceCounter >= SILENCE_HANGOVER_CHUNKS) {
+                            Log.d(TAG, "Silenzio prolungato confermato: reset del KWS")
+                            keywordSpotter.reset()
+                            wasVoiceLikely = false
+                            silenceCounter = 0
+                            continue
+                        }
+                    }
+                }
+
+                // Alimentiamo il modello solo se siamo nella finestra di "voce" (inclusi i micro-silenzi tollerati)
+                if (wasVoiceLikely) {
+                    val score = keywordSpotter.processChunk(pcm)
+                    if (score != null) {
+                        if (keywordSpotter.checkDetection(score)) {
+                            onWakeWordDetected()
+                            preRollChunks.clear()
+                            wasVoiceLikely = false
+                            silenceCounter = 0
+                        }
+                    }
+                } else {
+                    // Manteniamo aggiornato il buffer di pre-roll solo nel VERO silenzio
+                    preRollChunks.addLast(pcm)
+                    if (preRollChunks.size > PRE_ROLL_MAX_CHUNKS) {
+                        preRollChunks.removeFirst()
                     }
                 }
             }
@@ -214,10 +261,9 @@ class ListeningForegroundService : Service() {
             Log.d(TAG, "Rilevazione ignorata: comando già in gestione")
             return
         }
-
+        takeAudioFocus() // per silenziare qualunque media in play
         LocalVoiceInteractionService.triggerAssistantUI()
         audioCue.playListeningCue()
-        Log.d(TAG, "Wake-word gestita: beep suonato, avvio Vosk tra poco")
 
         scope.launch {
             // Leggiamo e buttiamo l'audio mentre il beep suona per evitare che si accumuli nel buffer di sistema.
@@ -228,7 +274,7 @@ class ListeningForegroundService : Service() {
             while (System.currentTimeMillis() - startDiscard < discardTimeMs) {
                 sharedMic.readChunk(dumpBuffer)
             }
-
+            sharedMic.setEnhancementsEnabled(true) // accensione soppressione del rumore
             stt.startListening { text ->
                 Log.d(TAG, "Vosk ha consegnato: '$text'")
                 handleRecognizedText(text)
@@ -240,21 +286,27 @@ class ListeningForegroundService : Service() {
         val voiceIntent = parser.parse(text)
         val confirmationMessage = actionExecutor.execute(voiceIntent)
         Log.d(TAG, "Intent=$voiceIntent conferma='$confirmationMessage'")
+
+        val isPauseCommand = voiceIntent is com.example.localvoice.intent.VoiceIntent.PauseMedia // controllo per ristabilire o meno il focus se era un comando di pausa
         if (confirmationMessage.isNotBlank()) {
             tts.speak(confirmationMessage) {
                 com.example.localvoice.LoriVoiceInteractionSession.closeUI()
-                resumeKeywordSpotting() // Riattivazione della Wake Word
+                resumeKeywordSpotting(isPauseCommand) // Riattivazione della Wake Word
             }
         } else {
             com.example.localvoice.LoriVoiceInteractionSession.closeUI()
-            resumeKeywordSpotting() // Riattivazione della Wake Word
+            resumeKeywordSpotting(isPauseCommand) // Riattivazione della Wake Word
         }
     }
 
     // reset dello stato pulito
-    private fun resumeKeywordSpotting() {
+    private fun resumeKeywordSpotting(isPauseCommand: Boolean = false) {
         keywordSpotter.reset()
         capturingCommand.set(false)
+        sharedMic.setEnhancementsEnabled(false) // filtri soppressione del rumore spenti
+        if (isPauseCommand) { SetFocusLoss() } // check per vedere se si può far ripartire eventuali media
+
+        releaseAudioFocus() // per far ripartire i media che erano in play
         Log.d(TAG, "Motore Wake-Word pulito e riattivato")
     }
 
@@ -303,11 +355,67 @@ class ListeningForegroundService : Service() {
             .build()
     }
 
+    private fun takeAudioFocus() {
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+            audioFocusRequest = android.media.AudioFocusRequest.Builder(android.media.AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_EXCLUSIVE)
+                .setAudioAttributes(
+                    android.media.AudioAttributes.Builder()
+                        .setUsage(android.media.AudioAttributes.USAGE_ASSISTANT)
+                        .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SPEECH)
+                        .build()
+                )
+                .setAcceptsDelayedFocusGain(false)
+                .setOnAudioFocusChangeListener { /* Gestito automaticamente dal sistema */ }
+                .build()
+
+            audioFocusRequest?.let { audioManager.requestAudioFocus(it) }
+        } else {
+            @Suppress("DEPRECATION")
+            audioManager.requestAudioFocus(null, android.media.AudioManager.STREAM_MUSIC, android.media.AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_EXCLUSIVE)
+        }
+        Log.d(TAG, "AudioFocus richiesto: media in background in pausa")
+    }
+
+    private fun releaseAudioFocus() {
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+            audioFocusRequest?.let { audioManager.abandonAudioFocusRequest(it) }
+        } else {
+            @Suppress("DEPRECATION")
+            audioManager.abandonAudioFocus(null)
+        }
+        Log.d(TAG, "AudioFocus rilasciato: i media in background possono riprendere")
+    }
+
+    // Trasformiamo la perdita di focus da temporanea a DEFINITIVA.
+    // Il player in background riceve AUDIOFOCUS_LOSS e cancella l'intento di auto-resume.
+    private fun SetFocusLoss(){
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+            val req = android.media.AudioFocusRequest.Builder(android.media.AudioManager.AUDIOFOCUS_GAIN)
+                .setAudioAttributes(
+                    android.media.AudioAttributes.Builder()
+                        .setUsage(android.media.AudioAttributes.USAGE_ASSISTANT)
+                        .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SPEECH)
+                        .build()
+                )
+                .build()
+            audioManager.requestAudioFocus(req)
+        } else {
+            @Suppress("DEPRECATION")
+            audioManager.requestAudioFocus(
+                null,
+                android.media.AudioManager.STREAM_MUSIC,
+                android.media.AudioManager.AUDIOFOCUS_GAIN
+            )
+        }
+    }
+
     companion object {
         private const val TAG = "LocalVoiceCascade"
         private const val NOTIFICATION_ID = 42
         private const val SAMPLE_RATE = 16000
         private const val CHUNK_SIZE_BYTES = 3200 // ~100ms a 16kHz, PCM 16-bit mono
+        private const val PRE_ROLL_MAX_CHUNKS = 25 // 25 chunk * 100ms (CHUNK_SIZE_BYTES) = ~2.5 secondi di audio in pre-roll
+        private const val SILENCE_HANGOVER_CHUNKS = 10 // 1 secondo di tolleranza (10 * 100ms)
         const val ACTION_FORCE_WAKE = "com.example.localvoice.ACTION_FORCE_WAKE"
     }
 }
