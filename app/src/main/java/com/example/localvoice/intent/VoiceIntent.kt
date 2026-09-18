@@ -10,5 +10,6 @@ sealed class VoiceIntent {
     data class SetVolume(val percent: Int) : VoiceIntent()
     data class AdjustVolume(val increase: Boolean) : VoiceIntent()
     data class PlayMusic(val query: String) : VoiceIntent()
+    data class CallContact(val contactName: String) : VoiceIntent()
     data object Unknown : VoiceIntent()
 }

@@ -11,6 +11,7 @@ class ActionExecutor(private val context: Context, private val tts: TtsEngine) {
     private val bluetoothAction = BluetoothAction(context)
     private val mediaAction = MediaAction(context)
     private val volumeAction = VolumeAction(context)
+    private val callAction = CallAction(context)
     private val spotifyAction = SpotifyAction(context)
     /** @return un breve messaggio da leggere via TTS come conferma. */
     fun execute(intent: VoiceIntent): String {
@@ -56,6 +57,9 @@ class ActionExecutor(private val context: Context, private val tts: TtsEngine) {
                 val result = volumeAction.adjust(intent.increase)
                 if (intent.increase) "Volume alzato, ora al $result percento"
                 else "Volume abbassato, ora al $result percento"
+            }
+            is VoiceIntent.CallContact -> {
+                callAction.call(intent.contactName) // Esegue l'azione e ritorna il testo di conferma
             }
             is VoiceIntent.PlayMusic -> {
                 // Asincrono per natura (richiede una chiamata di rete):

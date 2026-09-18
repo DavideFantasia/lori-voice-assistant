@@ -20,6 +20,11 @@
     <!-- Timer -->
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
 
+    <!-- per effettuare chiamate -->
+    <uses-permission android:name="android.permission.READ_CONTACTS" />
+    <uses-permission android:name="android.permission.CALL_PHONE" />
+    <uses-feature android:name="android.hardware.telephony" android:required="false" />
+
     <!-- Necessario da Android 13+ perché QUALSIASI notifica creata dall'app
          (inclusa quella di scadenza timer) sia effettivamente visibile —
          senza, la chiamata a notify() non fallisce, semplicemente non

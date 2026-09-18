@@ -214,7 +214,7 @@ class VoskSttEngine(
         val partialText = JSONObject(recGrammar.partialResult).optString("partial", "")
         if (partialText.isNotEmpty()) {
             com.example.localvoice.VoiceUIState.transcriptionFlow.value = partialText
-            val triggerWords = listOf("cerca", "trova", "metti", "suona", "riproduci", "ascoltiamo")
+            val triggerWords = listOf("cerca", "trova", "metti", "suona", "riproduci", "ascoltiamo", "chiama", "telefona")
             if (triggerWords.any { partialText.contains(it) }) {
                 return true
             }
@@ -275,6 +275,7 @@ class VoskSttEngine(
                 "pausa", "ferma", "tutto", "musica", "stoppa", "silenzio",
                 "suona", "riproduci", "ascoltiamo",
                 "volume", "porta", "a", "al", "alza", "abbassa", "aumenta", "diminuisci",
+                "chiama", "telefona",
                 "uno", "due", "tre", "quattro", "cinque", "sei", "sette", "otto", "nove", "dieci",
                 "undici", "dodici", "quindici", "venti", "venticinque", "trenta",
                 "quaranta", "quarantacinque", "cinquanta", "sessanta", "settanta",

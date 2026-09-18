@@ -48,7 +48,9 @@ class MainActivity : ComponentActivity() {
     private var hasPromptedAssistant = false
     private var hasPromptedBattery = false
     private val requiredPermissions = mutableListOf(
-        Manifest.permission.RECORD_AUDIO
+        Manifest.permission.RECORD_AUDIO,
+        Manifest.permission.READ_CONTACTS,
+        Manifest.permission.CALL_PHONE
     ).apply {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             add(Manifest.permission.POST_NOTIFICATIONS)

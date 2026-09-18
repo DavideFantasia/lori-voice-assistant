@@ -70,16 +70,17 @@ Il modello di riconoscimento vocale va scaricato manualmente a causa delle dimen
 
 I comandi sono elaborati localmente (tramite Regex) da `CommandParser.kt` ed eseguiti da `ActionExecutor.kt`. È possibile estendere facilmente la lista.
 
-| Comando | Azione | Note |
-| :--- | :--- | :--- |
-| `"cerca [query] su internet"` | Ricerca Web | Apre il browser predefinito |
-| `"imposta un timer di [N] [min/sec/ore]"` | Timer | Usa `AlarmManager` (richiede permessi sveglie e notifiche) |
-| `"accendi/spegni bluetooth"` | Bluetooth | Su Android 13+ apre il prompt di conferma di sistema |
-| `"prossima [canzone]" / "successiva"` | Media Control | `KEYCODE_MEDIA_NEXT` |
-| `"precedente"` | Media Control | `KEYCODE_MEDIA_PREVIOUS` |
-| `"pausa" / "ferma tutto"` | Media Control | `KEYCODE_MEDIA_PAUSE` |
-| `"volume al [X]"` | Volume | Imposta il volume media alla % indicata |
-| `"alza/abbassa il volume"` | Volume | Regolazione relativa |
-| `"metti [ricerca]"` | Spotify | Cerca tramite API e apre l'app Spotify via Intent |
+| Comando                                   | Azione        | Note                                                       |
+|:------------------------------------------|:--------------|:-----------------------------------------------------------|
+| `"cerca [query] su internet"`             | Ricerca Web   | Apre il browser predefinito                                |
+| `"imposta un timer di [N] [min/sec/ore]"` | Timer         | Usa `AlarmManager` (richiede permessi sveglie e notifiche) |
+| `"accendi/spegni bluetooth"`              | Bluetooth     | Su Android 13+ apre il prompt di conferma di sistema       |
+| `"prossima [canzone]" / "successiva"`     | Media Control | `KEYCODE_MEDIA_NEXT`                                       |
+| `"precedente"`                            | Media Control | `KEYCODE_MEDIA_PREVIOUS`                                   |
+| `"pausa" / "ferma tutto"`                 | Media Control | `KEYCODE_MEDIA_PAUSE`                                      |
+| `"volume al [X]"`                         | Volume        | Imposta il volume media alla % indicata                    |
+| `"alza/abbassa il volume"`                | Volume        | Regolazione relativa                                       |
+| `"metti [ricerca]"`                       | Spotify       | Cerca tramite API e apre l'app Spotify via Intent          |
+| `"chiama [contatto]"`                     | Rubrica       | chiama il contatto col nome corrispondente in rubrica      |
 
 *Nota sul riconoscimento vocale:* Vosk è configurato in **Grammar mode**, limitando il riconoscimento alle parole chiave dei comandi per massimizzare la precisione e la velocità. Questo può ridurre l'accuratezza nelle query a testo libero (come le ricerche web). Per disattivarlo, rimuovi `GRAMMAR_JSON` dall'inizializzazione del `Recognizer` in `VoskSttEngine.kt`.

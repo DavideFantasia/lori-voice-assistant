@@ -64,6 +64,10 @@ class CommandParser {
         """(?:abbassa|diminuisci)(?:\s+il)?\s+volume""", RegexOption.IGNORE_CASE
     )
 
+    private val callPattern = Regex(
+        """(?:chiama|telefona\s+a)\s+(.+)""", RegexOption.IGNORE_CASE
+    )
+
     private val playMusicPattern = Regex(
         """(?:metti|suona|riproduci|ascoltiamo)\s+(.+)""", RegexOption.IGNORE_CASE
     )
@@ -139,6 +143,11 @@ class CommandParser {
         if (volumeDownPattern.containsMatchIn(text)) {
             return VoiceIntent.AdjustVolume(increase = false)
         }
+
+        callPattern.find(text)?.let { match ->
+            return VoiceIntent.CallContact(match.groupValues[1].trim())
+        }
+
         playMusicPattern.find(text)?.let {
             return VoiceIntent.PlayMusic(it.groupValues[1].trim())
         }
