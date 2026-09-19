@@ -42,7 +42,7 @@ TextToSpeech (TTS di sistema per la conferma)
 
 Per far funzionare correttamente LocalVoice su GrapheneOS, sono necessarie alcune configurazioni di sistema:
 
-1. **Motore TTS (Sintesi Vocale):** GrapheneOS include un motore TTS predefinito eslusivamente in inglese. Installa un motore open-source (come **RHVoice** o **eSpeak-NG** via F-Droid) per altre lingue, impostandolo da *Impostazioni > Sistema > Lingue e input > Output sintesi vocale*.
+1. **Motore TTS (Sintesi Vocale):** GrapheneOS include un motore TTS predefinito eslusivamente in inglese. Installa un motore open-source (come **[SherpaTTS](https://github.com/woheller69/ttsEngine)** o **eSpeak-NG** via F-Droid) per altre lingue, impostandolo da *Impostazioni > Sistema > Lingue e input > Output sintesi vocale*.
 2. **Batteria:** L'esecuzione continua in background richiede la rimozione delle restrizioni energetiche. Vai in *Impostazioni > App > LocalVoice > Batteria* e seleziona **"Non limitata"** (accessibile anche tramite l'apposita scorciatoia nella `MainActivity`).
 3. **Assistente Predefinito (Opzionale):** Per impostare *Lori* come assistente di sistema, vai in *Impostazioni > App > App predefinite > App di assistenza digitale* (o usa il pulsante in app).
 
