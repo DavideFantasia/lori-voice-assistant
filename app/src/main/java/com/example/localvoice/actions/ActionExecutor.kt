@@ -30,11 +30,11 @@ class ActionExecutor(private val context: Context, private val tts: TtsEngine) {
                 }
             }
             is VoiceIntent.BluetoothToggle -> {
-                val toggledDirectly = bluetoothAction.setEnabled(intent.turnOn)
-                if (toggledDirectly) {
-                    if (intent.turnOn) "Bluetooth acceso" else "Bluetooth spento"
-                } else {
-                    "Apro le impostazioni Bluetooth, conferma tu la modifica"
+                when (bluetoothAction.setEnabled(intent.turnOn)) {
+                    com.example.localvoice.actions.BluetoothResult.SuccessOn -> "Bluetooth acceso"
+                    com.example.localvoice.actions.BluetoothResult.SuccessOff -> "Bluetooth spento"
+                    com.example.localvoice.actions.BluetoothResult.RequiresManualSettings -> "Apro le impostazioni Bluetooth, conferma tu la modifica"
+                    com.example.localvoice.actions.BluetoothResult.MissingPermission -> "Non ho il permesso per controllare il Bluetooth"
                 }
             }
             VoiceIntent.NextTrack -> {

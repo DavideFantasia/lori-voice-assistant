@@ -46,7 +46,7 @@ class LocalKeywordSpotter(
     melAsset: String = "melspectrogram.onnx",
     embAsset: String = "embedding_model.onnx",
     classifierAsset: String,
-    private val threshold: Float = 0.75f,
+    private val threshold: Float = 0.05f,
     private val cooldownMs: Long = 1200L
 ) : KeywordSpotter {
 

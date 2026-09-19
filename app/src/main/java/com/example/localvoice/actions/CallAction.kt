@@ -1,21 +1,29 @@
 package com.example.localvoice.actions
 
+import android.Manifest
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.provider.ContactsContract
 import android.util.Log
+import androidx.core.content.ContextCompat
 
 class CallAction(private val context: Context) {
 
     fun call(contactName: String): String {
+        // Controllo preventivo del permesso di lettura rubrica
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.READ_CONTACTS) != PackageManager.PERMISSION_GRANTED) {
+            Log.e("CallAction", "Permesso READ_CONTACTS mancante")
+            return "Non ho il permesso per leggere la rubrica"
+        }
+
         val contentResolver = context.contentResolver
         val uri = ContactsContract.CommonDataKinds.Phone.CONTENT_URI
         val projection = arrayOf(
             ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME,
             ContactsContract.CommonDataKinds.Phone.NUMBER
         )
-        // Cerca il nome usando LIKE (case insensitive) per permettere match parziali
         val selection = "${ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME} LIKE ?"
         val selectionArgs = arrayOf("%$contactName%")
 
@@ -31,14 +39,13 @@ class CallAction(private val context: Context) {
                     phoneNumber = cursor.getString(numberIndex)
                 }
             }
-        } catch (e: SecurityException) {
-            Log.e("CallAction", "Permesso READ_CONTACTS mancante", e)
-            return "Non ho il permesso per leggere la rubrica"
+        } catch (e: Exception) {
+            Log.e("CallAction", "Errore durante la lettura dei contatti", e)
+            return "Si è verificato un errore nella lettura della rubrica"
         }
 
         if (phoneNumber != null) {
             return try {
-                // Prova ad avviare la chiamata diretta
                 val intent = Intent(Intent.ACTION_CALL).apply {
                     data = Uri.parse("tel:$phoneNumber")
                     addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
@@ -46,13 +53,12 @@ class CallAction(private val context: Context) {
                 context.startActivity(intent)
                 "Chiamo $matchedName"
             } catch (e: SecurityException) {
-                // Fallback: se manca il permesso di chiamata diretta, apre il tastierino numerico
                 val intent = Intent(Intent.ACTION_DIAL).apply {
                     data = Uri.parse("tel:$phoneNumber")
                     addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 }
                 context.startActivity(intent)
-                "Preparo la chiamata per $matchedName"
+                "Preparo la chiamata per $matchedName, non ho il permesso per avviarla direttamente"
             }
         }
 

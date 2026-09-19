@@ -9,45 +9,35 @@ import android.os.Build
 import android.provider.Settings
 import androidx.core.content.ContextCompat
 
+sealed class BluetoothResult {
+    data object SuccessOn : BluetoothResult()
+    data object SuccessOff : BluetoothResult()
+    data object RequiresManualSettings : BluetoothResult()
+    data object MissingPermission : BluetoothResult()
+}
+
 class BluetoothAction(private val context: Context) {
 
-    /**
-     * A partire da Android 13 (API 33), BluetoothAdapter.enable()/disable()
-     * sono no-op per qualunque app non privilegiata: ritornano SEMPRE false,
-     * indipendentemente dai permessi concessi. È una restrizione voluta da
-     * Google (le app non possono più alterare silenziosamente lo stato del
-     * Bluetooth), non un bug risolvibile lato nostro.
-     *
-     * Quindi: se il dispositivo è Android 13+, saltiamo direttamente
-     * all'apertura delle impostazioni Bluetooth di sistema — è l'unica
-     * strada disponibile per qualunque app di terze parti su Android
-     * moderno, incluso questo assistente.
-     *
-     * @return true se il Bluetooth è stato effettivamente attivato/disattivato
-     *         a livello di codice (possibile solo su Android 12 e precedenti),
-     *         false se invece è stato aperto il pannello impostazioni per
-     *         completamento manuale dall'utente.
-     */
-    fun setEnabled(turnOn: Boolean): Boolean {
+    fun setEnabled(turnOn: Boolean): BluetoothResult {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             openBluetoothSettings()
-            return false
+            return BluetoothResult.RequiresManualSettings
         }
 
         val hasPermission = Build.VERSION.SDK_INT < Build.VERSION_CODES.S ||
-            ContextCompat.checkSelfPermission(
-                context, Manifest.permission.BLUETOOTH_CONNECT
-            ) == PackageManager.PERMISSION_GRANTED
+                ContextCompat.checkSelfPermission(
+                    context, Manifest.permission.BLUETOOTH_CONNECT
+                ) == PackageManager.PERMISSION_GRANTED
 
+        // Gestione esplicita del permesso mancante
         if (!hasPermission) {
-            openBluetoothSettings()
-            return false
+            return BluetoothResult.MissingPermission
         }
 
         val adapter = BluetoothAdapter.getDefaultAdapter()
         if (adapter == null) {
             openBluetoothSettings()
-            return false
+            return BluetoothResult.RequiresManualSettings
         }
 
         val toggled = try {
@@ -57,8 +47,12 @@ class BluetoothAction(private val context: Context) {
             false
         }
 
-        if (!toggled) openBluetoothSettings()
-        return toggled
+        return if (toggled) {
+            if (turnOn) BluetoothResult.SuccessOn else BluetoothResult.SuccessOff
+        } else {
+            openBluetoothSettings()
+            BluetoothResult.RequiresManualSettings
+        }
     }
 
     private fun openBluetoothSettings() {
