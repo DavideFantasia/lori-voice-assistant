@@ -262,6 +262,7 @@ class ListeningForegroundService : Service() {
             return
         }
         takeAudioFocus() // per silenziare qualunque media in play
+        SetWakeLock(3000) // da il woke allo schermo per 3 secondi
         LocalVoiceInteractionService.triggerAssistantUI()
         audioCue.playListeningCue()
 
@@ -407,6 +408,18 @@ class ListeningForegroundService : Service() {
                 android.media.AudioManager.AUDIOFOCUS_GAIN
             )
         }
+    }
+
+    // prende il focus dello schermo (lo accende) per un timeout di time millisecondi
+    private fun SetWakeLock(time: Long){
+        val powerManager = getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
+        @Suppress("DEPRECATION") // SCREEN_BRIGHT_WAKE_LOCK è deprecato per le app standard, ma vitale per i servizi in background
+        val wakeLock = powerManager.newWakeLock(
+            android.os.PowerManager.SCREEN_BRIGHT_WAKE_LOCK or android.os.PowerManager.ACQUIRE_CAUSES_WAKEUP,
+            "LocalVoice::WakeScreen"
+        )
+        // Il lock durerà 3 secondi, dopodiché lo schermo seguirà il normale timeout di sistema
+        wakeLock.acquire(time)
     }
 
     companion object {
